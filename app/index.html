@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Action Swaps</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0a0a0a;
+      --surface: #141414;
+      --border: #2a2a2a;
+      --text: #e0e0e0;
+      --text-dim: #888;
+      --accent: #4f9eff;
+      --accent-hover: #6db3ff;
+      --success: #34d399;
+      --warning: #fbbf24;
+      --error: #f87171;
+      --radius: 8px;
+      --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    header h1 {
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+    }
+
+    #wallet-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 8px 16px;
+      border-radius: var(--radius);
+      font-size: 14px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+
+    #wallet-btn:hover { background: var(--accent-hover); }
+    #wallet-btn.connected { background: var(--success); }
+
+    main {
+      max-width: 640px;
+      margin: 32px auto;
+      padding: 0 24px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 4px;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .tab {
+      padding: 10px 20px;
+      background: none;
+      border: none;
+      color: var(--text-dim);
+      font-size: 14px;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      margin-bottom: -1px;
+    }
+
+    .tab.active {
+      color: var(--text);
+      border-bottom-color: var(--accent);
+    }
+
+    .panel { display: none; }
+    .panel.active { display: block; }
+
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    input, select {
+      width: 100%;
+      padding: 10px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 14px;
+      font-family: var(--mono);
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .btn {
+      width: 100%;
+      padding: 12px;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .btn-primary:hover { background: var(--accent-hover); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    .status-box {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-top: 16px;
+      font-family: var(--mono);
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .status-box .line { margin-bottom: 4px; }
+    .status-box .success { color: var(--success); }
+    .status-box .error { color: var(--error); }
+    .status-box .warn { color: var(--warning); }
+    .status-box .dim { color: var(--text-dim); }
+
+    .swap-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .swap-card h3 {
+      font-size: 14px;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .swap-card .detail {
+      font-size: 13px;
+      color: var(--text-dim);
+      font-family: var(--mono);
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+
+    .badge-created { background: #1e3a5f; color: var(--accent); }
+    .badge-executed { background: #064e3b; color: var(--success); }
+    .badge-refunded { background: #78350f; color: var(--warning); }
+    .badge-expired { background: #450a0a; color: var(--error); }
+
+    .section-title {
+      font-size: 13px;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-bottom: 12px;
+    }
+
+    .deposit-info {
+      background: #0d1f3c;
+      border: 1px solid #1e3a5f;
+      border-radius: var(--radius);
+      padding: 12px;
+      margin-top: 12px;
+    }
+
+    .deposit-info p {
+      font-size: 13px;
+      margin-bottom: 6px;
+    }
+
+    .deposit-info .addr {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--accent);
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Action Swaps</h1>
+  <button id="wallet-btn" onclick="connectWallet()">Connect Wallet</button>
+</header>
+
+<main>
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('create')">Create</button>
+    <button class="tab" onclick="showTab('status')">Status</button>
+    <button class="tab" onclick="showTab('execute')">Execute</button>
+    <button class="tab" onclick="showTab('preview')">Gas Preview</button>
+    <button class="tab" onclick="showTab('verify')">Verify CID</button>
+  </div>
+
+  <!-- CREATE SWAP -->
+  <div id="panel-create" class="panel active">
+    <div class="row">
+      <div class="form-group">
+        <label>Source Chain</label>
+        <select id="source-chain">
+          <option value="base-sepolia">Base Sepolia</option>
+          <option value="ethereum-sepolia">Ethereum Sepolia</option>
+          <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
+          <option value="optimism-sepolia">Optimism Sepolia</option>
+          <option value="bitcoin-signet">Bitcoin Signet</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Dest Chain</label>
+        <select id="dest-chain">
+          <option value="ethereum-sepolia">Ethereum Sepolia</option>
+          <option value="base-sepolia">Base Sepolia</option>
+          <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
+          <option value="optimism-sepolia">Optimism Sepolia</option>
+          <option value="bitcoin-signet">Bitcoin Signet</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="form-group">
+        <label>Source Amount (wei/sat)</label>
+        <input type="text" id="source-amount" placeholder="1000000000000000000">
+      </div>
+      <div class="form-group">
+        <label>Dest Amount (wei/sat)</label>
+        <input type="text" id="dest-amount" placeholder="1000000000000000000">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="form-group">
+        <label>Refund Address (Source)</label>
+        <input type="text" id="refund-source" placeholder="0x...">
+      </div>
+      <div class="form-group">
+        <label>Refund Address (Dest)</label>
+        <input type="text" id="refund-dest" placeholder="0x...">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="form-group">
+        <label>Fee (basis points)</label>
+        <input type="number" id="fee-bps" value="50" min="0" max="10000">
+      </div>
+      <div class="form-group">
+        <label>Expiration (hours)</label>
+        <input type="number" id="expiration-hours" value="1" min="0.1" step="0.1">
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="form-group">
+        <label>Swap Type</label>
+        <select id="action-type">
+          <option value="evm-evm">EVM &lt;&gt; EVM</option>
+          <option value="evm-btc">EVM &lt;&gt; Bitcoin</option>
+          <option value="evm-zec">EVM &lt;&gt; Zcash</option>
+          <option value="btc-zec">Bitcoin &lt;&gt; Zcash</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Webhook URL (optional)</label>
+        <input type="url" id="webhook-url" placeholder="https://your-server.com/webhook">
+      </div>
+    </div>
+
+    <div class="form-group">
+      <label>Source Token Address (leave empty for native ETH/BTC)</label>
+      <input type="text" id="token-source" placeholder="0x... (ERC-20 contract address)">
+    </div>
+    <div class="form-group">
+      <label>Dest Token Address (leave empty for native ETH/BTC)</label>
+      <input type="text" id="token-dest" placeholder="0x... (ERC-20 contract address)">
+    </div>
+
+    <button class="btn btn-primary" id="create-btn" onclick="createSwap()" disabled>
+      Connect wallet to create swap
+    </button>
+
+    <div id="create-output" class="status-box" style="display:none"></div>
+  </div>
+
+  <!-- CHECK STATUS -->
+  <div id="panel-status" class="panel">
+    <div class="form-group">
+      <label>Swap ID</label>
+      <input type="number" id="status-swap-id" placeholder="0" min="0">
+    </div>
+    <button class="btn btn-primary" onclick="checkStatus()">Check Status</button>
+    <div id="status-output" class="status-box" style="display:none"></div>
+  </div>
+
+  <!-- EXECUTE -->
+  <div id="panel-execute" class="panel">
+    <div class="form-group">
+      <label>Swap ID</label>
+      <input type="number" id="execute-swap-id" placeholder="0" min="0">
+    </div>
+    <div class="form-group">
+      <label>Lit API Key</label>
+      <input type="password" id="lit-api-key" placeholder="Your Lit Chipotle API key">
+    </div>
+    <button class="btn btn-primary" onclick="executeSwap()">Execute Swap</button>
+    <div id="execute-output" class="status-box" style="display:none"></div>
+  </div>
+
+  <!-- GAS PREVIEW -->
+  <div id="panel-preview" class="panel">
+    <p class="section-title">Estimate total costs before creating a swap</p>
+    <div class="row">
+      <div class="form-group">
+        <label>Source Chain</label>
+        <select id="preview-source-chain">
+          <option value="base-sepolia">Base Sepolia</option>
+          <option value="ethereum-sepolia">Ethereum Sepolia</option>
+          <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Dest Chain</label>
+        <select id="preview-dest-chain">
+          <option value="ethereum-sepolia">Ethereum Sepolia</option>
+          <option value="base-sepolia">Base Sepolia</option>
+          <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
+        </select>
+      </div>
+    </div>
+    <div class="row">
+      <div class="form-group">
+        <label>Source Amount (wei)</label>
+        <input type="text" id="preview-source-amount" placeholder="1000000000000000000">
+      </div>
+      <div class="form-group">
+        <label>Fee (bps)</label>
+        <input type="number" id="preview-fee-bps" value="50">
+      </div>
+    </div>
+    <button class="btn btn-primary" onclick="gasPreview()">Estimate Gas Costs</button>
+    <div id="preview-output" class="status-box" style="display:none"></div>
+  </div>
+
+  <!-- VERIFY CID -->
+  <div id="panel-verify" class="panel">
+    <p class="section-title">Verify a swap's Lit Action matches its template</p>
+    <div class="form-group">
+      <label>Swap ID</label>
+      <input type="number" id="verify-swap-id" placeholder="0" min="0">
+    </div>
+    <div class="form-group">
+      <label>Salt (from swap creation)</label>
+      <input type="text" id="verify-salt" placeholder="sha256 hex string">
+    </div>
+    <div class="form-group">
+      <label>Action Type</label>
+      <select id="verify-action-type">
+        <option value="evm-evm">EVM &lt;&gt; EVM</option>
+        <option value="evm-btc">EVM &lt;&gt; Bitcoin</option>
+      </select>
+    </div>
+    <button class="btn btn-primary" onclick="verifyCid()">Verify CID</button>
+    <div id="verify-output" class="status-box" style="display:none"></div>
+  </div>
+</main>
+
+<script src="swap-engine.js"></script>
+</body>
+</html>

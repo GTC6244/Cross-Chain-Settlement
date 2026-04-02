@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.context/
+out/
+cache/
+broadcast/
+
+# Foundry
+contracts/out/
+contracts/cache/
+
+# Environment
+.env
+.env.local
+
+# Bundled actions
+src/actions/bundled/
