@@ -14,12 +14,12 @@ The Lit Action's private key exists only inside the Lit network's threshold cryp
 
 ## Chain pairs
 
-| Pair | Status |
-|------|--------|
-| EVM <> EVM | Working (Base, Ethereum, Arbitrum, Optimism testnets) |
-| EVM <> Bitcoin | Template ready (Mempool API for UTXO) |
-| EVM <> Zcash | Planned (transparent addresses only) |
-| Bitcoin <> Zcash | Planned |
+| Pair | Status | Action file |
+|------|--------|-------------|
+| EVM <> EVM | Working | `app/actions/evm-evm-action.js` |
+| EVM <> Bitcoin | Template ready | `app/actions/evm-btc-action.js` |
+| EVM <> Zcash | Template ready | `app/actions/evm-zec-action.js` |
+| Bitcoin <> Zcash | Template ready | `app/actions/btc-zec-action.js` |
 
 ## Architecture
 
@@ -74,18 +74,32 @@ Supports native tokens and ERC-20 (token address fields, `address(0)` = native).
 
 ## Lit Actions
 
-Each swap type has its own action template. Per-swap uniqueness via salt injection before IPFS upload.
+Four action templates, one per swap type. Each is a standalone JavaScript file that runs inside Lit's Deno sandbox. Per-swap uniqueness via salt injection before IPFS upload (unique CID = unique key = unique deposit addresses).
 
 ```
-app/swap-engine.js          # EVM<>EVM action (inline)
-app/actions/evm-btc-action.js  # EVM<>Bitcoin action
+app/actions/
+  evm-evm-action.js   # EVM <> EVM    — ethers v5 on both sides
+  evm-btc-action.js   # EVM <> BTC    — ethers + Mempool.space API
+  evm-zec-action.js   # EVM <> Zcash  — ethers + Insight/Blockchair API
+  btc-zec-action.js   # BTC <> Zcash  — both UTXO, no EVM leg
 ```
 
-Actions have two modes:
-- `mode: "derive"` returns deposit addresses
-- `mode: "execute"` runs the full swap
+All actions have two modes:
+- `mode: "derive"` returns deposit addresses (used during swap creation)
+- `mode: "execute"` runs the full swap lifecycle
 
-Security: the action reads ALL params from the on-chain contract. Only `swapId`, `baseRpcUrl`, and `contractAddress` are passed via `js_params`.
+**Security:** actions read ALL params from the on-chain contract. Only `swapId`, `baseRpcUrl`, and `contractAddress` are passed via `js_params`.
+
+**Settlement order:** slower/riskier chain always settles first. If the second leg fails, the action is idempotent and can be re-executed.
+
+**Chain-specific details:**
+
+| Action | Settlement order | Fee collection | UTXO API | Dust limit |
+|--------|-----------------|----------------|----------|------------|
+| EVM<>EVM | Either (both fast) | Source EVM side | N/A | N/A |
+| EVM<>BTC | BTC first | EVM side | Mempool.space | 546 sats |
+| EVM<>ZEC | ZEC first | EVM side | Insight + Blockchair fallback | 5460 zats |
+| BTC<>ZEC | BTC first | ZEC side (no EVM leg) | Both APIs | 546 sats / 5460 zats |
 
 ## Features
 
