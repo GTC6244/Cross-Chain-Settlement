@@ -15,3 +15,5 @@ contracts/cache/
 
 # Bundled actions
 src/actions/bundled/
+.gstack/
+.claude/
