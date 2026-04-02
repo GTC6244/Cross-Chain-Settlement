@@ -51,6 +51,12 @@ contract SwapContract {
         // ERC-20 token addresses (address(0) = native token)
         address tokenAddressSource;
         address tokenAddressDest;
+
+        // Per-leg settlement tracking (enables idempotent re-execution)
+        bool sourceLegSettled;
+        bool destLegSettled;
+        string sourceLegTxHash;  // chain-specific tx hash for source leg
+        string destLegTxHash;    // chain-specific tx hash for dest leg
     }
 
     address public owner;
@@ -69,6 +75,7 @@ contract SwapContract {
     event SwapExecuted(uint256 indexed swapId);
     event SwapRefunded(uint256 indexed swapId);
     event SwapExpired(uint256 indexed swapId);
+    event LegSettled(uint256 indexed swapId, bool isSourceLeg, string txHash);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -168,13 +175,43 @@ contract SwapContract {
     }
 
     /**
-     * @notice Mark a swap as executed (called by the Lit Action after settlement)
+     * @notice Record that one leg of the swap has been settled.
+     *         Called by the Lit Action after each successful transfer.
+     *         Enables idempotent re-execution: on retry, the action
+     *         checks which legs are done and only settles the remainder.
+     * @param swapId The swap ID
+     * @param isSourceLeg true = source chain leg, false = dest chain leg
+     * @param txHash The chain-specific transaction hash (for auditability)
+     */
+    function markLegSettled(uint256 swapId, bool isSourceLeg, string calldata txHash)
+        external
+        onlyLitAction(swapId)
+        inState(swapId, SwapState.Created)
+    {
+        Swap storage s = swaps[swapId];
+        if (isSourceLeg) {
+            require(!s.sourceLegSettled, "source leg already settled");
+            s.sourceLegSettled = true;
+            s.sourceLegTxHash = txHash;
+        } else {
+            require(!s.destLegSettled, "dest leg already settled");
+            s.destLegSettled = true;
+            s.destLegTxHash = txHash;
+        }
+        emit LegSettled(swapId, isSourceLeg, txHash);
+    }
+
+    /**
+     * @notice Mark a swap as fully executed. Requires both legs settled.
+     *         Called by the Lit Action after both transfers complete.
      */
     function markExecuted(uint256 swapId)
         external
         onlyLitAction(swapId)
         inState(swapId, SwapState.Created)
     {
+        require(swaps[swapId].sourceLegSettled, "source leg not settled");
+        require(swaps[swapId].destLegSettled, "dest leg not settled");
         swaps[swapId].state = SwapState.Executed;
         emit SwapExecuted(swapId);
     }
@@ -238,6 +275,24 @@ contract SwapContract {
             s.depositAddressSource,
             s.depositAddressDest,
             s.confirmationBlocks
+        );
+    }
+
+    /**
+     * @notice Get per-leg settlement status
+     */
+    function getSwapLegs(uint256 swapId) external view returns (
+        bool sourceLegSettled,
+        bool destLegSettled,
+        string memory sourceLegTxHash,
+        string memory destLegTxHash
+    ) {
+        Swap storage s = swaps[swapId];
+        return (
+            s.sourceLegSettled,
+            s.destLegSettled,
+            s.sourceLegTxHash,
+            s.destLegTxHash
         );
     }
 

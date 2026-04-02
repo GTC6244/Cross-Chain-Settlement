@@ -30,30 +30,22 @@ contract SwapContractTest is Test {
             50,
             "QmTestCid123",
             litActionAddr,
-            address(0),  // native token source
-            address(0)   // native token dest
+            address(0),
+            address(0)
         );
     }
 
-    function _createErc20Swap() internal returns (uint256) {
-        return swap.createSwap(
-            "base-sepolia",
-            "ethereum-sepolia",
-            1000000,     // 1 USDC (6 decimals)
-            1000000,
-            "0xRefundSource",
-            "0xRefundDest",
-            "0xDepositSource",
-            "0xDepositDest",
-            1,
-            block.timestamp + 1 hours,
-            50,
-            "QmErc20Cid",
-            litActionAddr,
-            usdc,        // USDC on source
-            usdc         // USDC on dest
-        );
+    // Helper: settle both legs for a swap
+    function _settleBothLegs(uint256 swapId) internal {
+        vm.startPrank(litActionAddr);
+        swap.markLegSettled(swapId, true, "0xSourceTxHash");
+        swap.markLegSettled(swapId, false, "0xDestTxHash");
+        vm.stopPrank();
     }
+
+    // -----------------------------------------------------------------------
+    // createSwap
+    // -----------------------------------------------------------------------
 
     function test_createSwap() public {
         uint256 swapId = _createTestSwap();
@@ -90,6 +82,15 @@ contract SwapContractTest is Test {
         assertTrue(expirationTimestamp > block.timestamp);
     }
 
+    function test_createSwap_legsInitiallyUnsettled() public {
+        uint256 swapId = _createTestSwap();
+        (bool srcSettled, bool dstSettled, string memory srcTx, string memory dstTx) = swap.getSwapLegs(swapId);
+        assertFalse(srcSettled);
+        assertFalse(dstSettled);
+        assertEq(bytes(srcTx).length, 0);
+        assertEq(bytes(dstTx).length, 0);
+    }
+
     function test_createSwap_nativeTokens() public {
         uint256 swapId = _createTestSwap();
         (address tokenSrc, address tokenDst) = swap.getSwapTokens(swapId);
@@ -98,7 +99,12 @@ contract SwapContractTest is Test {
     }
 
     function test_createSwap_erc20Tokens() public {
-        uint256 swapId = _createErc20Swap();
+        uint256 swapId = swap.createSwap(
+            "base-sepolia", "ethereum-sepolia", 1000000, 1000000,
+            "0xRefundSource", "0xRefundDest", "0xDepositSource", "0xDepositDest",
+            1, block.timestamp + 1 hours, 50, "QmErc20Cid", litActionAddr,
+            usdc, usdc
+        );
         (address tokenSrc, address tokenDst) = swap.getSwapTokens(swapId);
         assertEq(tokenSrc, usdc);
         assertEq(tokenDst, usdc);
@@ -106,15 +112,7 @@ contract SwapContractTest is Test {
 
     function test_createSwap_emitsEvent() public {
         vm.expectEmit(true, false, false, true);
-        emit SwapContract.SwapCreated(
-            0,
-            "base-sepolia",
-            "bitcoin-signet",
-            1 ether,
-            100000,
-            "QmTestCid123",
-            owner
-        );
+        emit SwapContract.SwapCreated(0, "base-sepolia", "bitcoin-signet", 1 ether, 100000, "QmTestCid123", owner);
         _createTestSwap();
     }
 
@@ -151,24 +149,146 @@ contract SwapContractTest is Test {
         swap.createSwap("a", "b", 1, 1, "", "", "", "", 1, block.timestamp + 1, 50, "cid", address(0), address(0), address(0));
     }
 
-    function test_markExecuted() public {
+    // -----------------------------------------------------------------------
+    // markLegSettled
+    // -----------------------------------------------------------------------
+
+    function test_markLegSettled_source() public {
         uint256 swapId = _createTestSwap();
         vm.prank(litActionAddr);
+        swap.markLegSettled(swapId, true, "0xabc123");
+
+        (bool srcSettled, bool dstSettled, string memory srcTx, string memory dstTx) = swap.getSwapLegs(swapId);
+        assertTrue(srcSettled);
+        assertFalse(dstSettled);
+        assertEq(srcTx, "0xabc123");
+        assertEq(bytes(dstTx).length, 0);
+    }
+
+    function test_markLegSettled_dest() public {
+        uint256 swapId = _createTestSwap();
+        vm.prank(litActionAddr);
+        swap.markLegSettled(swapId, false, "0xdef456");
+
+        (bool srcSettled, bool dstSettled,, string memory dstTx) = swap.getSwapLegs(swapId);
+        assertFalse(srcSettled);
+        assertTrue(dstSettled);
+        assertEq(dstTx, "0xdef456");
+    }
+
+    function test_markLegSettled_bothLegs() public {
+        uint256 swapId = _createTestSwap();
+        _settleBothLegs(swapId);
+
+        (bool srcSettled, bool dstSettled, string memory srcTx, string memory dstTx) = swap.getSwapLegs(swapId);
+        assertTrue(srcSettled);
+        assertTrue(dstSettled);
+        assertEq(srcTx, "0xSourceTxHash");
+        assertEq(dstTx, "0xDestTxHash");
+    }
+
+    function test_markLegSettled_emitsEvent() public {
+        uint256 swapId = _createTestSwap();
+        vm.expectEmit(true, false, false, true);
+        emit SwapContract.LegSettled(swapId, true, "0xabc");
+        vm.prank(litActionAddr);
+        swap.markLegSettled(swapId, true, "0xabc");
+    }
+
+    function test_markLegSettled_revert_notLitAction() public {
+        uint256 swapId = _createTestSwap();
+        vm.prank(alice);
+        vm.expectRevert("not lit action");
+        swap.markLegSettled(swapId, true, "0xabc");
+    }
+
+    function test_markLegSettled_revert_alreadySettled_source() public {
+        uint256 swapId = _createTestSwap();
+        vm.startPrank(litActionAddr);
+        swap.markLegSettled(swapId, true, "0xfirst");
+        vm.expectRevert("source leg already settled");
+        swap.markLegSettled(swapId, true, "0xsecond");
+        vm.stopPrank();
+    }
+
+    function test_markLegSettled_revert_alreadySettled_dest() public {
+        uint256 swapId = _createTestSwap();
+        vm.startPrank(litActionAddr);
+        swap.markLegSettled(swapId, false, "0xfirst");
+        vm.expectRevert("dest leg already settled");
+        swap.markLegSettled(swapId, false, "0xsecond");
+        vm.stopPrank();
+    }
+
+    function test_markLegSettled_revert_wrongState() public {
+        uint256 swapId = _createTestSwap();
+        // Execute the swap first
+        _settleBothLegs(swapId);
+        vm.prank(litActionAddr);
         swap.markExecuted(swapId);
+        // Now try to settle a leg on an executed swap
+        vm.prank(litActionAddr);
+        vm.expectRevert("invalid state");
+        swap.markLegSettled(swapId, true, "0xlate");
+    }
+
+    // -----------------------------------------------------------------------
+    // markExecuted (now requires both legs)
+    // -----------------------------------------------------------------------
+
+    function test_markExecuted_afterBothLegs() public {
+        uint256 swapId = _createTestSwap();
+        _settleBothLegs(swapId);
+
+        vm.prank(litActionAddr);
+        swap.markExecuted(swapId);
+
         (SwapContract.SwapState state,,,,,,,) = swap.getSwapState(swapId);
         assertEq(uint8(state), uint8(SwapContract.SwapState.Executed));
     }
 
     function test_markExecuted_emitsEvent() public {
         uint256 swapId = _createTestSwap();
+        _settleBothLegs(swapId);
+
         vm.expectEmit(true, false, false, false);
         emit SwapContract.SwapExecuted(swapId);
         vm.prank(litActionAddr);
         swap.markExecuted(swapId);
     }
 
+    function test_markExecuted_revert_sourceLegNotSettled() public {
+        uint256 swapId = _createTestSwap();
+        // Only settle dest leg
+        vm.prank(litActionAddr);
+        swap.markLegSettled(swapId, false, "0xdest");
+
+        vm.prank(litActionAddr);
+        vm.expectRevert("source leg not settled");
+        swap.markExecuted(swapId);
+    }
+
+    function test_markExecuted_revert_destLegNotSettled() public {
+        uint256 swapId = _createTestSwap();
+        // Only settle source leg
+        vm.prank(litActionAddr);
+        swap.markLegSettled(swapId, true, "0xsrc");
+
+        vm.prank(litActionAddr);
+        vm.expectRevert("dest leg not settled");
+        swap.markExecuted(swapId);
+    }
+
+    function test_markExecuted_revert_noLegsSettled() public {
+        uint256 swapId = _createTestSwap();
+        vm.prank(litActionAddr);
+        vm.expectRevert("source leg not settled");
+        swap.markExecuted(swapId);
+    }
+
     function test_markExecuted_revert_notLitAction() public {
         uint256 swapId = _createTestSwap();
+        _settleBothLegs(swapId);
         vm.prank(alice);
         vm.expectRevert("not lit action");
         swap.markExecuted(swapId);
@@ -176,12 +296,18 @@ contract SwapContractTest is Test {
 
     function test_markExecuted_revert_wrongState() public {
         uint256 swapId = _createTestSwap();
+        _settleBothLegs(swapId);
         vm.prank(litActionAddr);
         swap.markExecuted(swapId);
+        // Try again
         vm.prank(litActionAddr);
         vm.expectRevert("invalid state");
         swap.markExecuted(swapId);
     }
+
+    // -----------------------------------------------------------------------
+    // markRefunded
+    // -----------------------------------------------------------------------
 
     function test_markRefunded() public {
         uint256 swapId = _createTestSwap();
@@ -197,6 +323,22 @@ contract SwapContractTest is Test {
         vm.expectRevert("not lit action");
         swap.markRefunded(swapId);
     }
+
+    // Refund allowed even with one leg settled (partial settlement recovery)
+    function test_markRefunded_afterPartialSettlement() public {
+        uint256 swapId = _createTestSwap();
+        vm.startPrank(litActionAddr);
+        swap.markLegSettled(swapId, true, "0xsource");
+        swap.markRefunded(swapId);
+        vm.stopPrank();
+
+        (SwapContract.SwapState state,,,,,,,) = swap.getSwapState(swapId);
+        assertEq(uint8(state), uint8(SwapContract.SwapState.Refunded));
+    }
+
+    // -----------------------------------------------------------------------
+    // Ownership
+    // -----------------------------------------------------------------------
 
     function test_transferOwnership() public {
         swap.transferOwnership(alice);
@@ -214,12 +356,15 @@ contract SwapContractTest is Test {
         swap.transferOwnership(address(0));
     }
 
+    // -----------------------------------------------------------------------
+    // Edge cases
+    // -----------------------------------------------------------------------
+
     function test_maxFee() public {
         swap.createSwap("a", "b", 1, 1, "", "", "", "", 1, block.timestamp + 1, 10000, "cid", litActionAddr, address(0), address(0));
     }
 
     function test_mixedTokenSwap() public {
-        // ERC-20 on source, native on dest
         uint256 swapId = swap.createSwap(
             "base-sepolia", "ethereum-sepolia", 1000000, 1 ether,
             "0xRefund", "0xRefund", "0xDep", "0xDep",
@@ -229,5 +374,38 @@ contract SwapContractTest is Test {
         (address tokenSrc, address tokenDst) = swap.getSwapTokens(swapId);
         assertEq(tokenSrc, usdc);
         assertEq(tokenDst, address(0));
+    }
+
+    // Full lifecycle: create -> settle source -> settle dest -> execute
+    function test_fullLifecycle() public {
+        uint256 swapId = _createTestSwap();
+
+        // Initially Created, no legs settled
+        (SwapContract.SwapState state0,,,,,,,) = swap.getSwapState(swapId);
+        assertEq(uint8(state0), uint8(SwapContract.SwapState.Created));
+
+        // Settle source leg
+        vm.prank(litActionAddr);
+        swap.markLegSettled(swapId, true, "0xbtc-txid-abc");
+        (bool src1, bool dst1,,) = swap.getSwapLegs(swapId);
+        assertTrue(src1);
+        assertFalse(dst1);
+
+        // Still in Created state
+        (SwapContract.SwapState state1,,,,,,,) = swap.getSwapState(swapId);
+        assertEq(uint8(state1), uint8(SwapContract.SwapState.Created));
+
+        // Settle dest leg
+        vm.prank(litActionAddr);
+        swap.markLegSettled(swapId, false, "0xeth-txhash-def");
+        (bool src2, bool dst2,,) = swap.getSwapLegs(swapId);
+        assertTrue(src2);
+        assertTrue(dst2);
+
+        // Mark executed
+        vm.prank(litActionAddr);
+        swap.markExecuted(swapId);
+        (SwapContract.SwapState state2,,,,,,,) = swap.getSwapState(swapId);
+        assertEq(uint8(state2), uint8(SwapContract.SwapState.Executed));
     }
 }

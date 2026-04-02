@@ -9,6 +9,11 @@
  * - The Base contract is still the source of truth (read via ethers)
  * - markExecuted/markRefunded still called on Base (action needs Base gas)
  *
+ * Idempotent re-execution: each leg's settlement is logged to the contract
+ * via markLegSettled(). On retry, the action checks which legs are done
+ * and only attempts the remaining ones. This handles one-sided settlement
+ * failure safely.
+ *
  * BTC side: Mempool.space API for UTXOs and broadcasting
  * ZEC side: Insight/Blockchair API for UTXOs and broadcasting
  *
@@ -21,7 +26,7 @@
 
 function getBtcZecActionCode(salt) {
   return `
-// Lit Action: Bitcoin <> Zcash Swap
+// Lit Action: Bitcoin <> Zcash Swap (idempotent, per-leg settlement)
 // ethers v5 global available (used only for Base contract calls).
 // BTC and ZEC via HTTP APIs.
 const SWAP_SALT = "${salt}";
@@ -55,12 +60,17 @@ async function main(params) {
   var abi = [
     "function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)",
     "function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,uint256)",
-    "function owner() view returns (address)"
+    "function getSwapLegs(uint256) view returns (bool,bool,string,string)",
+    "function owner() view returns (address)",
+    "function markLegSettled(uint256,bool,string)",
+    "function markExecuted(uint256)",
+    "function markRefunded(uint256)"
   ];
   var contract = new ethers.Contract(params.contractAddress, abi, baseProvider);
 
   var stateResult = await contract.getSwapState(params.swapId);
   var addrResult = await contract.getSwapAddresses(params.swapId);
+  var legResult = await contract.getSwapLegs(params.swapId);
   var feeRecipient = await contract.owner();
 
   var state = stateResult[0];
@@ -76,6 +86,10 @@ async function main(params) {
   var depositSource = addrResult[4];  // BTC deposit address
   var depositDest = addrResult[5];    // ZEC deposit address (t-address)
 
+  // Per-leg settlement status
+  var sourceLegSettled = legResult[0];
+  var destLegSettled = legResult[1];
+
   if (state !== 0) {
     return { status: "error", message: "Swap not in Created state" };
   }
@@ -85,74 +99,112 @@ async function main(params) {
   // -----------------------------------------------------------------------
   if (Date.now() > expirationTs) {
     return await handleRefund(privateKeyHex, depositSource, depositDest,
-      refundSource, refundDest, params, baseProvider);
+      refundSource, refundDest, params, baseProvider, abi);
   }
 
   // -----------------------------------------------------------------------
-  // Check balances on both UTXO chains
+  // Check balances (only for legs not yet settled)
   // -----------------------------------------------------------------------
-  var btcUtxos = await fetchBtcUtxos(depositSource);
-  var btcBalance = btcUtxos.reduce(function(sum, u) { return sum + u.value; }, 0);
-
-  var zecUtxos = await fetchZecUtxos(depositDest);
-  var zecBalance = zecUtxos.reduce(function(sum, u) { return sum + u.satoshis; }, 0);
-
-  if (btcBalance < sourceAmount.toNumber() || zecBalance < destAmount.toNumber()) {
-    return {
-      status: "insufficient_funds",
-      btcBalance: btcBalance.toString(),
-      zecBalance: zecBalance.toString(),
-      requiredBtc: sourceAmount.toString(),
-      requiredZec: destAmount.toString(),
-    };
+  if (!sourceLegSettled) {
+    var btcUtxos = await fetchBtcUtxos(depositSource);
+    var btcBalance = btcUtxos.reduce(function(sum, u) { return sum + u.value; }, 0);
+    if (btcBalance < sourceAmount.toNumber()) {
+      return {
+        status: "insufficient_funds",
+        leg: "source",
+        btcBalance: btcBalance.toString(),
+        requiredBtc: sourceAmount.toString(),
+        destLegSettled: destLegSettled,
+      };
+    }
   }
 
-  // -----------------------------------------------------------------------
-  // SETTLE BTC FIRST (slower, higher fee volatility)
-  // Source party deposited BTC, dest party deposited ZEC.
-  // BTC goes to dest party (refundDest), ZEC goes to source party (refundSource).
-  // -----------------------------------------------------------------------
-  var btcTxResult;
-  try {
-    btcTxResult = await sendBtcTransaction(
-      privateKeyHex, btcUtxos, refundDest, sourceAmount.toNumber(), depositSource
-    );
-  } catch (e) {
-    return { status: "error", message: "BTC send failed: " + e.message, phase: "btc_settlement" };
+  if (!destLegSettled) {
+    var zecUtxos = await fetchZecUtxos(depositDest);
+    var zecBalance = zecUtxos.reduce(function(sum, u) { return sum + u.satoshis; }, 0);
+    if (zecBalance < destAmount.toNumber()) {
+      return {
+        status: "insufficient_funds",
+        leg: "dest",
+        zecBalance: zecBalance.toString(),
+        requiredZec: destAmount.toString(),
+        sourceLegSettled: sourceLegSettled,
+      };
+    }
   }
 
-  // -----------------------------------------------------------------------
-  // THEN SETTLE ZEC (fees deducted from ZEC side)
-  // No EVM leg, so fees come from the ZEC transfer.
-  // -----------------------------------------------------------------------
+  // Calculate fees (ZEC side, since no EVM leg)
   var zecFee = Math.floor(destAmount.toNumber() * feeBps / 10000);
   var zecNet = destAmount.toNumber() - zecFee;
 
-  var zecTxResult;
-  try {
-    zecTxResult = await sendZecTransaction(
-      privateKeyHex, zecUtxos, refundSource, zecNet, depositDest
-    );
-  } catch (e) {
-    // BTC already sent but ZEC failed. Funds are recoverable via re-execution.
-    return {
-      status: "error",
-      message: "ZEC send failed after BTC settled: " + e.message,
-      phase: "zec_settlement",
-      btcTxId: btcTxResult.txid,
-      recoverable: true,
-    };
+  // Create a signer for contract calls
+  var baseWallet = new ethers.Wallet(privateKeyHex, baseProvider);
+  var settleContract = new ethers.Contract(params.contractAddress, abi, baseWallet);
+
+  var result = {
+    status: "executed",
+    sourceLegSettled: sourceLegSettled,
+    destLegSettled: destLegSettled,
+    resumed: sourceLegSettled || destLegSettled,
+  };
+
+  // -----------------------------------------------------------------------
+  // SETTLE BTC (source leg) FIRST (slower, higher fee volatility)
+  // Source party deposited BTC, dest party deposited ZEC.
+  // BTC goes to dest party (refundDest), ZEC goes to source party (refundSource).
+  // -----------------------------------------------------------------------
+  if (!sourceLegSettled) {
+    var btcUtxosForSend = btcUtxos || await fetchBtcUtxos(depositSource);
+    var btcTxResult;
+    try {
+      btcTxResult = await sendBtcTransaction(
+        privateKeyHex, btcUtxosForSend, refundDest, sourceAmount.toNumber(), depositSource
+      );
+    } catch (e) {
+      return { status: "error", message: "BTC send failed: " + e.message, phase: "btc_settlement" };
+    }
+    result.btcTxId = btcTxResult.txid;
+
+    // Log to contract immediately (makes re-execution safe)
+    await settleContract.markLegSettled(params.swapId, true, btcTxResult.txid);
+    sourceLegSettled = true;
+  } else {
+    result.btcTxId = legResult[2]; // from contract
+    result.sourceSkipped = true;
   }
 
   // -----------------------------------------------------------------------
-  // Send ZEC fee to contract owner's ZEC address
-  // The owner needs a ZEC t-address to receive fees from BTC<>ZEC swaps.
-  // We use the feeRecipient from the contract (EVM address) but for
-  // ZEC fee collection, the fee stays in the deposit address and is
-  // swept to the owner's EVM address via the Base contract gas sweep.
-  //
-  // Alternative: accumulate ZEC fees in the action wallet, batch-sweep later.
-  // For now, fees remain in the action wallet as excess (swept on refund).
+  // THEN SETTLE ZEC (dest leg, fees deducted from ZEC side)
+  // No EVM leg, so fees come from the ZEC transfer.
+  // -----------------------------------------------------------------------
+  if (!destLegSettled) {
+    var zecUtxosForSend = zecUtxos || await fetchZecUtxos(depositDest);
+    var zecTxResult;
+    try {
+      zecTxResult = await sendZecTransaction(
+        privateKeyHex, zecUtxosForSend, refundSource, zecNet, depositDest
+      );
+    } catch (e) {
+      return {
+        status: "error",
+        message: "ZEC send failed after BTC settled: " + e.message,
+        phase: "zec_settlement",
+        btcTxId: result.btcTxId,
+        recoverable: true,
+      };
+    }
+    result.zecTxId = zecTxResult.txid;
+
+    // Log to contract immediately
+    await settleContract.markLegSettled(params.swapId, false, zecTxResult.txid);
+    destLegSettled = true;
+  } else {
+    result.zecTxId = legResult[3]; // from contract
+    result.destSkipped = true;
+  }
+
+  // -----------------------------------------------------------------------
+  // ZEC fee handling
   // -----------------------------------------------------------------------
   var feeResult = {};
   if (zecFee > 0) {
@@ -172,35 +224,27 @@ async function main(params) {
   }
 
   // -----------------------------------------------------------------------
-  // Mark executed on Base contract
+  // Mark fully executed (contract enforces both legs settled)
   // -----------------------------------------------------------------------
-  var baseW = new ethers.Wallet(privateKeyHex, baseProvider);
-  var mAbi = ["function markExecuted(uint256)"];
-  var mContract = new ethers.Contract(params.contractAddress, mAbi, baseW);
-  await mContract.markExecuted(params.swapId);
+  await settleContract.markExecuted(params.swapId);
 
   // -----------------------------------------------------------------------
   // Sign receipt
   // -----------------------------------------------------------------------
   var receipt = JSON.stringify({
     swapId: params.swapId,
-    btcTx: btcTxResult.txid,
-    zecTx: zecTxResult.txid,
+    btcTx: result.btcTxId,
+    zecTx: result.zecTxId,
     sourceAmount: sourceAmount.toString(),
     destAmount: destAmount.toString(),
     zecFee: zecFee,
+    resumed: result.resumed,
     timestamp: Date.now(),
   });
-  var receiptSig = await baseW.signMessage(receipt);
+  result.receipt = receipt;
+  result.receiptSignature = await baseWallet.signMessage(receipt);
 
-  return {
-    status: "executed",
-    btcTxId: btcTxResult.txid,
-    zecTxId: zecTxResult.txid,
-    receipt: receipt,
-    receiptSignature: receiptSig,
-    ...feeResult,
-  };
+  return Object.assign(result, feeResult);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +353,7 @@ async function sendZecTransaction(privateKeyHex, utxos, toAddress, amountZats, c
 // ---------------------------------------------------------------------------
 
 async function handleRefund(privateKeyHex, depositBtc, depositZec,
-  refundSource, refundDest, params, baseProvider) {
+  refundSource, refundDest, params, baseProvider, abi) {
   var results = {};
 
   // Refund BTC side
@@ -338,8 +382,7 @@ async function handleRefund(privateKeyHex, depositBtc, depositZec,
 
   // Mark refunded on Base contract
   var baseW = new ethers.Wallet(privateKeyHex, baseProvider);
-  var mAbi = ["function markRefunded(uint256)"];
-  var mContract = new ethers.Contract(params.contractAddress, mAbi, baseW);
+  var mContract = new ethers.Contract(params.contractAddress, abi, baseW);
   await mContract.markRefunded(params.swapId);
 
   return { status: "refunded", ...results };

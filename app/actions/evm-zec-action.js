@@ -13,6 +13,11 @@
  * - Balance checks (GET /addr/{addr}/utxo)
  * - Transaction broadcasting (POST /tx/send)
  *
+ * Idempotent re-execution: each leg's settlement is logged to the contract
+ * via markLegSettled(). On retry, the action checks which legs are done
+ * and only attempts the remaining ones. This handles one-sided settlement
+ * failure safely.
+ *
  * Architecture:
  * - Settle ZEC first (slower chain, higher risk)
  * - Fees collected on EVM side only
@@ -29,7 +34,7 @@
 
 function getEvmZecActionCode(salt) {
   return `
-// Lit Action: EVM <> Zcash Swap
+// Lit Action: EVM <> Zcash Swap (idempotent, per-leg settlement)
 // ethers v5 global available. ZEC via HTTP APIs (transparent addresses only).
 const SWAP_SALT = "${salt}";
 
@@ -66,12 +71,17 @@ async function main(params) {
   var abi = [
     "function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)",
     "function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,uint256)",
-    "function owner() view returns (address)"
+    "function getSwapLegs(uint256) view returns (bool,bool,string,string)",
+    "function owner() view returns (address)",
+    "function markLegSettled(uint256,bool,string)",
+    "function markExecuted(uint256)",
+    "function markRefunded(uint256)"
   ];
   var contract = new ethers.Contract(params.contractAddress, abi, baseProvider);
 
   var stateResult = await contract.getSwapState(params.swapId);
   var addrResult = await contract.getSwapAddresses(params.swapId);
+  var legResult = await contract.getSwapLegs(params.swapId);
   var feeRecipient = await contract.owner();
 
   var state = stateResult[0];
@@ -86,6 +96,10 @@ async function main(params) {
   var refundDest = addrResult[3];     // ZEC refund address (t-address)
   var depositSource = addrResult[4];  // EVM deposit address
   var depositDest = addrResult[5];    // ZEC deposit address (t-address)
+
+  // Per-leg settlement status
+  var sourceLegSettled = legResult[0];
+  var destLegSettled = legResult[1];
 
   var rpcMap = {
     "base-sepolia": "https://sepolia.base.org",
@@ -108,99 +122,139 @@ async function main(params) {
   // -----------------------------------------------------------------------
   if (Date.now() > expirationTs) {
     return await handleRefund(privateKeyHex, evmRpc, depositSource, depositDest,
-      refundSource, refundDest, params, baseProvider);
+      refundSource, refundDest, params, baseProvider, abi);
   }
 
   // -----------------------------------------------------------------------
-  // Check balances on both chains
+  // Check balances (only for legs not yet settled)
   // -----------------------------------------------------------------------
   var evmProvider = new ethers.providers.JsonRpcProvider(evmRpc);
-  var evmBalance = await evmProvider.getBalance(depositSource);
 
-  var zecUtxos = await fetchZecUtxos(depositDest);
-  var zecBalance = zecUtxos.reduce(function(sum, u) { return sum + u.satoshis; }, 0);
-
-  if (evmBalance.lt(sourceAmount) || zecBalance < destAmount.toNumber()) {
-    return {
-      status: "insufficient_funds",
-      evmBalance: evmBalance.toString(),
-      zecBalance: zecBalance.toString(),
-      requiredEvm: sourceAmount.toString(),
-      requiredZec: destAmount.toString(),
-    };
+  if (!sourceLegSettled) {
+    var evmBalance = await evmProvider.getBalance(depositSource);
+    if (evmBalance.lt(sourceAmount)) {
+      return {
+        status: "insufficient_funds",
+        leg: "source",
+        evmBalance: evmBalance.toString(),
+        requiredEvm: sourceAmount.toString(),
+        destLegSettled: destLegSettled,
+      };
+    }
   }
 
-  // -----------------------------------------------------------------------
-  // SETTLE ZEC FIRST (slower chain, higher risk)
-  // Source party deposited EVM, dest party deposited ZEC.
-  // ZEC goes to source party (refundSource), EVM goes to dest party (refundDest).
-  // -----------------------------------------------------------------------
-  var zecTxResult;
-  try {
-    zecTxResult = await sendZecTransaction(
-      privateKeyHex, zecUtxos, refundSource, destAmount.toNumber(), depositDest
-    );
-  } catch (e) {
-    return { status: "error", message: "ZEC send failed: " + e.message, phase: "zec_settlement" };
+  if (!destLegSettled) {
+    var zecUtxos = await fetchZecUtxos(depositDest);
+    var zecBalance = zecUtxos.reduce(function(sum, u) { return sum + u.satoshis; }, 0);
+    if (zecBalance < destAmount.toNumber()) {
+      return {
+        status: "insufficient_funds",
+        leg: "dest",
+        zecBalance: zecBalance.toString(),
+        requiredZec: destAmount.toString(),
+        sourceLegSettled: sourceLegSettled,
+      };
+    }
   }
 
-  // -----------------------------------------------------------------------
-  // THEN SETTLE EVM
-  // -----------------------------------------------------------------------
+  // Calculate fees (EVM side only)
   var fee = sourceAmount.mul(feeBps).div(10000);
   var evmNet = sourceAmount.sub(fee);
 
-  var evmWallet = new ethers.Wallet(privateKeyHex, evmProvider);
-  var txEvm = await evmWallet.sendTransaction({ to: refundDest, value: evmNet });
+  // Create a signer for contract calls
+  var baseWallet = new ethers.Wallet(privateKeyHex, baseProvider);
+  var settleContract = new ethers.Contract(params.contractAddress, abi, baseWallet);
 
-  // Send fee to owner (EVM side only)
-  var feeResult = {};
-  if (fee.gt(0)) {
-    var txFee = await evmWallet.sendTransaction({ to: feeRecipient, value: fee });
-    feeResult.feeHash = txFee.hash;
+  var result = {
+    status: "executed",
+    sourceLegSettled: sourceLegSettled,
+    destLegSettled: destLegSettled,
+    resumed: sourceLegSettled || destLegSettled,
+  };
+
+  // -----------------------------------------------------------------------
+  // SETTLE ZEC (dest leg) FIRST (slower chain, higher risk)
+  // Source party deposited EVM, dest party deposited ZEC.
+  // ZEC goes to source party (refundSource), EVM goes to dest party (refundDest).
+  // -----------------------------------------------------------------------
+  if (!destLegSettled) {
+    var zecUtxosForSend = zecUtxos || await fetchZecUtxos(depositDest);
+    var zecTxResult;
+    try {
+      zecTxResult = await sendZecTransaction(
+        privateKeyHex, zecUtxosForSend, refundSource, destAmount.toNumber(), depositDest
+      );
+    } catch (e) {
+      return { status: "error", message: "ZEC send failed: " + e.message, phase: "zec_settlement" };
+    }
+    result.zecTxId = zecTxResult.txid;
+
+    // Log to contract immediately (makes re-execution safe)
+    await settleContract.markLegSettled(params.swapId, false, zecTxResult.txid);
+    destLegSettled = true;
+  } else {
+    result.zecTxId = legResult[3]; // from contract
+    result.destSkipped = true;
   }
 
+  // -----------------------------------------------------------------------
+  // THEN SETTLE EVM (source leg)
+  // -----------------------------------------------------------------------
+  if (!sourceLegSettled) {
+    var evmWallet = new ethers.Wallet(privateKeyHex, evmProvider);
+    var txEvm = await evmWallet.sendTransaction({ to: refundDest, value: evmNet });
+    result.evmTxHash = txEvm.hash;
+
+    // Log to contract immediately
+    await settleContract.markLegSettled(params.swapId, true, txEvm.hash);
+    sourceLegSettled = true;
+
+    // Send fee to owner (EVM side only)
+    if (fee.gt(0)) {
+      var txFee = await evmWallet.sendTransaction({ to: feeRecipient, value: fee });
+      result.feeHash = txFee.hash;
+    }
+  } else {
+    result.evmTxHash = legResult[2]; // from contract
+    result.sourceSkipped = true;
+  }
+
+  // -----------------------------------------------------------------------
   // Sweep excess EVM deposits
+  // -----------------------------------------------------------------------
   var remainEvm = await evmProvider.getBalance(depositSource);
   if (remainEvm.gt(0)) {
+    var evmSweepWallet = new ethers.Wallet(privateKeyHex, evmProvider);
     var gpSweep = await evmProvider.getGasPrice();
     var gcSweep = gpSweep.mul(21000);
     var sweepAmt = remainEvm.sub(gcSweep);
     if (sweepAmt.gt(0)) {
-      await evmWallet.sendTransaction({ to: refundSource, value: sweepAmt, gasLimit: 21000 });
+      await evmSweepWallet.sendTransaction({ to: refundSource, value: sweepAmt, gasLimit: 21000 });
     }
   }
 
   // -----------------------------------------------------------------------
-  // Mark executed on contract
+  // Mark fully executed (contract enforces both legs settled)
   // -----------------------------------------------------------------------
-  var baseW = new ethers.Wallet(privateKeyHex, baseProvider);
-  var mAbi = ["function markExecuted(uint256)"];
-  var mContract = new ethers.Contract(params.contractAddress, mAbi, baseW);
-  await mContract.markExecuted(params.swapId);
+  await settleContract.markExecuted(params.swapId);
 
   // -----------------------------------------------------------------------
   // Sign receipt
   // -----------------------------------------------------------------------
   var receipt = JSON.stringify({
     swapId: params.swapId,
-    evmTx: txEvm.hash,
-    zecTx: zecTxResult.txid,
+    evmTx: result.evmTxHash,
+    zecTx: result.zecTxId,
     sourceAmount: sourceAmount.toString(),
     destAmount: destAmount.toString(),
     fee: fee.toString(),
+    resumed: result.resumed,
     timestamp: Date.now(),
   });
-  var receiptSig = await baseW.signMessage(receipt);
+  result.receipt = receipt;
+  result.receiptSignature = await baseWallet.signMessage(receipt);
 
-  return {
-    status: "executed",
-    evmTxHash: txEvm.hash,
-    zecTxId: zecTxResult.txid,
-    receipt: receipt,
-    receiptSignature: receiptSig,
-    ...feeResult,
-  };
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +355,7 @@ async function sendZecTransaction(privateKeyHex, utxos, toAddress, amountZats, c
  * Handle refund for expired swaps
  */
 async function handleRefund(privateKeyHex, evmRpc, depositEvm, depositZec,
-  refundSource, refundDest, params, baseProvider) {
+  refundSource, refundDest, params, baseProvider, abi) {
   var results = {};
 
   // Refund EVM side
@@ -332,8 +386,7 @@ async function handleRefund(privateKeyHex, evmRpc, depositEvm, depositZec,
 
   // Mark refunded on contract
   var baseW = new ethers.Wallet(privateKeyHex, baseProvider);
-  var mAbi = ["function markRefunded(uint256)"];
-  var mContract = new ethers.Contract(params.contractAddress, mAbi, baseW);
+  var mContract = new ethers.Contract(params.contractAddress, abi, baseW);
   await mContract.markRefunded(params.swapId);
 
   return { status: "refunded", ...results };
