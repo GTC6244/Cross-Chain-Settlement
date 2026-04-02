@@ -170,23 +170,25 @@ The test harness (`test/lit-harness.js`) mocks the Lit runtime so action code ca
 
 ## Setup
 
-**Prerequisites:** Node.js 22+, [Foundry](https://getfoundry.sh/), a Lit Chipotle account
+**Prerequisites:** [Foundry](https://getfoundry.sh/), a Lit Chipotle account, a web3 wallet (MetaMask)
+
+The web app is static HTML + JS with no build step. No Node.js required to run it.
 
 ```bash
-npm install
-
 # Deploy contract to Base Sepolia
 cd contracts
 forge install foundry-rs/forge-std
 forge test
 # forge script script/Deploy.s.sol --rpc-url https://sepolia.base.org --broadcast
 
-# Run the web app
+# Run the web app (any static file server works)
 cd app && python3 -m http.server 8899
 # Open http://localhost:8899
 ```
 
 Update `CONTRACT_ADDRESS` in `app/swap-engine.js` after deployment.
+
+**For running tests only** (optional): Node.js 22+ and `npm install` are needed for the test harness and key validation spike.
 
 ## Security model
 
