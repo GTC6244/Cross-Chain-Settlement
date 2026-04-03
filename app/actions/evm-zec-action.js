@@ -2,71 +2,73 @@
  * EVM <> Zcash Lit Action Template
  *
  * Runs inside Lit's Deno sandbox. ethers v5 is a global.
- * Zcash transparent (t-address) transactions use the same UTXO model
- * as Bitcoin, with a different address format and transaction version.
+ * Zcash transparent (t-address) transactions use bitcoinjs-lib with
+ * Zcash network parameters via jsdelivr ESM imports.
  *
  * Zcash t-addresses use secp256k1 (same curve as Bitcoin/Ethereum).
- * The 32-byte key from getLitActionPrivateKey() derives t-addresses
- * the same way Bitcoin derives addresses, just with Zcash prefixes.
+ * For transparent-only transactions, we use bitcoinjs-lib with Zcash
+ * network config (address prefixes differ from Bitcoin).
  *
- * Zcash side uses block explorer API for:
- * - Balance checks (GET /addr/{addr}/utxo)
- * - Transaction broadcasting (POST /tx/send)
+ * Idempotent re-execution via per-leg settlement logging.
  *
- * Idempotent re-execution: each leg's settlement is logged to the contract
- * via markLegSettled(). On retry, the action checks which legs are done
- * and only attempts the remaining ones. This handles one-sided settlement
- * failure safely.
+ * ZEC side uses block explorer API for:
+ * - UTXO queries
+ * - Transaction broadcasting
  *
  * Architecture:
  * - Settle ZEC first (slower chain, higher risk)
  * - Fees collected on EVM side only
  * - UTXO coin selection: largest-first
  * - Transparent addresses only (no shielded/z-address support)
- *
- * Zcash transaction differences from Bitcoin:
- * - Version group ID and expiry height fields
- * - Overwinter (v3) and Sapling (v4) transaction formats
- * - For transparent-only t-addr to t-addr, the structure is similar
- *   to Bitcoin with the addition of version-specific headers
  * - Amounts in zatoshis (1 ZEC = 100,000,000 zatoshis)
  */
 
 function getEvmZecActionCode(salt) {
   return `
+import * as bitcoin from "https://cdn.jsdelivr.net/npm/bitcoinjs-lib@7.0.0-rc.0/+esm";
+import * as ecc from "https://cdn.jsdelivr.net/npm/tiny-secp256k1@2.2.3/+esm";
+import { ECPairFactory } from "https://cdn.jsdelivr.net/npm/ecpair@3.0.0-rc.0/+esm";
+
 // Lit Action: EVM <> Zcash Swap (idempotent, per-leg settlement)
-// ethers v5 global available. ZEC via HTTP APIs (transparent addresses only).
+// ethers v5 global available. ZEC via bitcoinjs-lib + block explorer API.
 const SWAP_SALT = "${salt}";
 
-// Zcash testnet block explorer API
-// For mainnet, use a Zcash-compatible explorer (e.g., zcha.in, blockchair)
-var ZEC_API = "https://zcash.blockexplorer.com/api";
-var ZEC_TESTNET_API = "https://explorer.testnet.z.cash/api";
-// Use testnet by default
-var ACTIVE_ZEC_API = ZEC_TESTNET_API;
+var ZEC_API = "https://explorer.testnet.z.cash/api";
+var ECPair = ECPairFactory(ecc);
+
+// Zcash testnet network parameters for bitcoinjs-lib
+// t-addresses use the same secp256k1 curve, just different version bytes
+var zcashTestnet = {
+  messagePrefix: "\\x18Zcash Signed Message:\\n",
+  bech32: "ztestsapling",
+  bip32: { public: 0x043587cf, private: 0x04358394 },
+  pubKeyHash: 0x1d25,    // t1... on mainnet=0x1cb8, testnet=0x1d25
+  scriptHash: 0x1cba,    // t3... on mainnet=0x1cbd, testnet=0x1cba
+  wif: 0xef,
+};
 
 async function main(params) {
   var privateKeyHex = await Lit.Actions.getLitActionPrivateKey();
+  var keyBytes = Uint8Array.from(Buffer.from(privateKeyHex.replace("0x", ""), "hex"));
 
   // -----------------------------------------------------------------------
-  // Derive-only mode: return EVM + ZEC addresses
+  // Derive-only mode
   // -----------------------------------------------------------------------
   if (params.mode === "derive") {
-    var wallet = new ethers.Wallet(privateKeyHex);
-    // Return the compressed public key. The caller derives the
-    // t-address client-side using the Zcash t-addr prefix (t1... for mainnet,
-    // tm... for testnet). Same secp256k1 key, different address encoding.
+    var evmWallet = new ethers.Wallet(privateKeyHex);
+    var keyPair = ECPair.fromPrivateKey(Buffer.from(keyBytes), { network: zcashTestnet });
+    // Zcash t-addresses use P2PKH (not SegWit)
+    var p2pkh = bitcoin.payments.p2pkh({ pubkey: keyPair.publicKey, network: zcashTestnet });
     return {
-      evmAddress: wallet.address,
-      publicKey: wallet.signingKey.compressedPublicKey,
+      evmAddress: evmWallet.address,
+      zecAddress: p2pkh.address,
+      publicKey: evmWallet.signingKey.compressedPublicKey,
     };
   }
 
   // -----------------------------------------------------------------------
   // Execute mode
   // -----------------------------------------------------------------------
-
-  // Read swap params from on-chain contract
   var baseProvider = new ethers.providers.JsonRpcProvider(params.baseRpcUrl);
   var abi = [
     "function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)",
@@ -85,19 +87,18 @@ async function main(params) {
   var feeRecipient = await contract.owner();
 
   var state = stateResult[0];
-  var sourceAmount = stateResult[3];  // EVM side (wei)
-  var destAmount = stateResult[4];    // ZEC side (zatoshis)
+  var sourceAmount = stateResult[3];  // EVM (wei)
+  var destAmount = stateResult[4];    // ZEC (zatoshis)
   var feeBps = stateResult[5];
   var expirationTs = stateResult[6].toNumber() * 1000;
 
-  var sourceChain = addrResult[0];    // EVM chain
-  var destChain = addrResult[1];      // "zcash-testnet"
-  var refundSource = addrResult[2];   // EVM refund address
-  var refundDest = addrResult[3];     // ZEC refund address (t-address)
-  var depositSource = addrResult[4];  // EVM deposit address
-  var depositDest = addrResult[5];    // ZEC deposit address (t-address)
+  var sourceChain = addrResult[0];
+  var destChain = addrResult[1];
+  var refundSource = addrResult[2];   // EVM refund
+  var refundDest = addrResult[3];     // ZEC refund (t-address)
+  var depositSource = addrResult[4];  // EVM deposit
+  var depositDest = addrResult[5];    // ZEC deposit (t-address)
 
-  // Per-leg settlement status
   var sourceLegSettled = legResult[0];
   var destLegSettled = legResult[1];
 
@@ -109,59 +110,43 @@ async function main(params) {
   };
 
   var evmRpc = rpcMap[sourceChain];
-  if (!evmRpc) {
-    return { status: "error", message: "Unknown EVM chain: " + sourceChain };
-  }
-
-  if (state !== 0) {
-    return { status: "error", message: "Swap not in Created state" };
-  }
+  if (!evmRpc) return { status: "error", message: "Unknown EVM chain: " + sourceChain };
+  if (state !== 0) return { status: "error", message: "Swap not in Created state" };
 
   // -----------------------------------------------------------------------
-  // Check expiration
+  // Expiration
   // -----------------------------------------------------------------------
   if (Date.now() > expirationTs) {
-    return await handleRefund(privateKeyHex, evmRpc, depositSource, depositDest,
+    return await handleRefund(privateKeyHex, keyBytes, evmRpc, depositSource, depositDest,
       refundSource, refundDest, params, baseProvider, abi);
   }
 
   // -----------------------------------------------------------------------
-  // Check balances (only for legs not yet settled)
+  // Check balances
   // -----------------------------------------------------------------------
   var evmProvider = new ethers.providers.JsonRpcProvider(evmRpc);
 
   if (!sourceLegSettled) {
     var evmBalance = await evmProvider.getBalance(depositSource);
     if (evmBalance.lt(sourceAmount)) {
-      return {
-        status: "insufficient_funds",
-        leg: "source",
-        evmBalance: evmBalance.toString(),
-        requiredEvm: sourceAmount.toString(),
-        destLegSettled: destLegSettled,
-      };
+      return { status: "insufficient_funds", leg: "source", evmBalance: evmBalance.toString(),
+        requiredEvm: sourceAmount.toString(), destLegSettled: destLegSettled };
     }
   }
 
+  var zecUtxos;
   if (!destLegSettled) {
-    var zecUtxos = await fetchZecUtxos(depositDest);
-    var zecBalance = zecUtxos.reduce(function(sum, u) { return sum + u.satoshis; }, 0);
+    zecUtxos = await fetchZecUtxos(depositDest);
+    var zecBalance = zecUtxos.reduce(function(s, u) { return s + u.satoshis; }, 0);
     if (zecBalance < destAmount.toNumber()) {
-      return {
-        status: "insufficient_funds",
-        leg: "dest",
-        zecBalance: zecBalance.toString(),
-        requiredZec: destAmount.toString(),
-        sourceLegSettled: sourceLegSettled,
-      };
+      return { status: "insufficient_funds", leg: "dest", zecBalance: zecBalance.toString(),
+        requiredZec: destAmount.toString(), sourceLegSettled: sourceLegSettled };
     }
   }
 
-  // Calculate fees (EVM side only)
   var fee = sourceAmount.mul(feeBps).div(10000);
   var evmNet = sourceAmount.sub(fee);
 
-  // Create a signer for contract calls
   var baseWallet = new ethers.Wallet(privateKeyHex, baseProvider);
   var settleContract = new ethers.Contract(params.contractAddress, abi, baseWallet);
 
@@ -173,27 +158,18 @@ async function main(params) {
   };
 
   // -----------------------------------------------------------------------
-  // SETTLE ZEC (dest leg) FIRST (slower chain, higher risk)
-  // Source party deposited EVM, dest party deposited ZEC.
-  // ZEC goes to source party (refundSource), EVM goes to dest party (refundDest).
+  // SETTLE ZEC (dest leg) FIRST
   // -----------------------------------------------------------------------
   if (!destLegSettled) {
-    var zecUtxosForSend = zecUtxos || await fetchZecUtxos(depositDest);
-    var zecTxResult;
-    try {
-      zecTxResult = await sendZecTransaction(
-        privateKeyHex, zecUtxosForSend, refundSource, destAmount.toNumber(), depositDest
-      );
-    } catch (e) {
-      return { status: "error", message: "ZEC send failed: " + e.message, phase: "zec_settlement" };
-    }
+    zecUtxos = zecUtxos || await fetchZecUtxos(depositDest);
+    var zecTxResult = await buildAndBroadcastZecTx(
+      keyBytes, zecUtxos, refundSource, destAmount.toNumber(), depositDest
+    );
     result.zecTxId = zecTxResult.txid;
-
-    // Log to contract immediately (makes re-execution safe)
     await settleContract.markLegSettled(params.swapId, false, zecTxResult.txid);
     destLegSettled = true;
   } else {
-    result.zecTxId = legResult[3]; // from contract
+    result.zecTxId = legResult[3];
     result.destSkipped = true;
   }
 
@@ -204,161 +180,165 @@ async function main(params) {
     var evmWallet = new ethers.Wallet(privateKeyHex, evmProvider);
     var txEvm = await evmWallet.sendTransaction({ to: refundDest, value: evmNet });
     result.evmTxHash = txEvm.hash;
-
-    // Log to contract immediately
     await settleContract.markLegSettled(params.swapId, true, txEvm.hash);
     sourceLegSettled = true;
 
-    // Send fee to owner (EVM side only)
     if (fee.gt(0)) {
       var txFee = await evmWallet.sendTransaction({ to: feeRecipient, value: fee });
       result.feeHash = txFee.hash;
     }
   } else {
-    result.evmTxHash = legResult[2]; // from contract
+    result.evmTxHash = legResult[2];
     result.sourceSkipped = true;
   }
 
-  // -----------------------------------------------------------------------
-  // Sweep excess EVM deposits
-  // -----------------------------------------------------------------------
+  // Sweep excess EVM
   var remainEvm = await evmProvider.getBalance(depositSource);
   if (remainEvm.gt(0)) {
-    var evmSweepWallet = new ethers.Wallet(privateKeyHex, evmProvider);
-    var gpSweep = await evmProvider.getGasPrice();
-    var gcSweep = gpSweep.mul(21000);
-    var sweepAmt = remainEvm.sub(gcSweep);
-    if (sweepAmt.gt(0)) {
-      await evmSweepWallet.sendTransaction({ to: refundSource, value: sweepAmt, gasLimit: 21000 });
-    }
+    var evmW = new ethers.Wallet(privateKeyHex, evmProvider);
+    var gp = await evmProvider.getGasPrice();
+    var gc = gp.mul(21000);
+    var sweep = remainEvm.sub(gc);
+    if (sweep.gt(0)) await evmW.sendTransaction({ to: refundSource, value: sweep, gasLimit: 21000 });
   }
 
-  // -----------------------------------------------------------------------
-  // Mark fully executed (contract enforces both legs settled)
-  // -----------------------------------------------------------------------
+  // Mark executed
   await settleContract.markExecuted(params.swapId);
 
-  // -----------------------------------------------------------------------
   // Sign receipt
-  // -----------------------------------------------------------------------
   var receipt = JSON.stringify({
-    swapId: params.swapId,
-    evmTx: result.evmTxHash,
-    zecTx: result.zecTxId,
-    sourceAmount: sourceAmount.toString(),
-    destAmount: destAmount.toString(),
-    fee: fee.toString(),
-    resumed: result.resumed,
-    timestamp: Date.now(),
+    swapId: params.swapId, evmTx: result.evmTxHash, zecTx: result.zecTxId,
+    sourceAmount: sourceAmount.toString(), destAmount: destAmount.toString(),
+    fee: fee.toString(), resumed: result.resumed, timestamp: Date.now(),
   });
   result.receipt = receipt;
   result.receiptSignature = await baseWallet.signMessage(receipt);
-
   return result;
 }
 
 // ---------------------------------------------------------------------------
-// Zcash helpers (HTTP-based, transparent addresses only)
+// Zcash transaction construction (transparent t-addr only)
+// Uses bitcoinjs-lib with Zcash network parameters.
+// Zcash transparent transactions are structurally identical to Bitcoin
+// P2PKH transactions. The signing uses standard secp256k1 ECDSA.
 // ---------------------------------------------------------------------------
 
-/**
- * Fetch UTXOs for a Zcash transparent address.
- * Zcash block explorers use a similar API to Bitcoin explorers
- * but with slightly different response shapes.
- */
 async function fetchZecUtxos(address) {
-  // Try Insight-style API (used by many Zcash explorers)
-  var resp = await fetch(ACTIVE_ZEC_API + "/addr/" + address + "/utxo");
+  // Insight-style API
+  var resp = await fetch(ZEC_API + "/addr/" + address + "/utxo");
   if (!resp.ok) {
-    // Fallback: try blockchair-style API
+    // Fallback: Blockchair
     var resp2 = await fetch("https://api.blockchair.com/zcash/dashboards/address/" + address + "?limit=100");
     if (!resp2.ok) throw new Error("Failed to fetch ZEC UTXOs: " + resp.status);
     var data = await resp2.json();
     var utxos = (data.data && data.data[address] && data.data[address].utxo) || [];
     return utxos.map(function(u) {
-      return { txid: u.transaction_hash, vout: u.index, satoshis: u.value, confirmations: u.block_id > 0 ? 1 : 0 };
+      return { txid: u.transaction_hash, vout: u.index, satoshis: u.value,
+        confirmations: u.block_id > 0 ? 1 : 0, scriptPubKey: u.script_hex };
     });
   }
   var utxos = await resp.json();
-  // Insight API returns { txid, vout, satoshis, confirmations, ... }
   return utxos.filter(function(u) { return u.confirmations > 0; });
 }
 
-/**
- * Construct and send a Zcash transparent transaction.
- *
- * Zcash transparent transactions are structurally similar to Bitcoin
- * transactions but include:
- * - nVersionGroupId (for Overwinter+ transactions)
- * - nExpiryHeight (block height after which tx is invalid)
- * - valueBalance, vShieldedSpend, vShieldedOutput (empty for t-addr only)
- * - bindingSig (empty for t-addr only)
- *
- * For transparent-to-transparent, the core flow is identical to Bitcoin:
- * select UTXOs, construct inputs/outputs, sign with secp256k1 key.
- *
- * Amounts are in zatoshis (1 ZEC = 100,000,000 zatoshis).
- * Minimum relay fee is typically 1000 zatoshis (0.00001 ZEC).
- */
-async function sendZecTransaction(privateKeyHex, utxos, toAddress, amountZats, changeAddress) {
-  // Sort UTXOs largest-first for coin selection
+async function fetchZecTxHex(txid) {
+  var resp = await fetch(ZEC_API + "/rawtx/" + txid);
+  if (!resp.ok) throw new Error("Failed to fetch ZEC tx: " + txid);
+  var data = await resp.json();
+  return data.rawtx;
+}
+
+async function buildAndBroadcastZecTx(keyBytes, utxos, toAddress, amountZats, changeAddress) {
+  var keyPair = ECPair.fromPrivateKey(Buffer.from(keyBytes), { network: zcashTestnet });
+  var p2pkh = bitcoin.payments.p2pkh({ pubkey: keyPair.publicKey, network: zcashTestnet });
+
+  // Sort largest-first
   utxos.sort(function(a, b) { return b.satoshis - a.satoshis; });
 
+  // Coin selection
+  // P2PKH input ~148 bytes, output ~34 bytes, overhead ~10 bytes
   var selected = [];
   var total = 0;
-  // Zcash transparent tx fee: ~1000 zats minimum, scale with size
-  var feeRate = 10; // zats/byte (generous for testnet)
-  // Zcash v4 tx overhead is larger than Bitcoin due to extra fields
-  var baseSize = 76; // header + version group + expiry + empty sapling fields
-  var inputSize = 148; // per transparent input
-  var outputSize = 34; // per transparent output
-  var estimatedSize = baseSize + 1 * inputSize + 2 * outputSize;
+  var feeRate = 10; // zats/byte (Zcash convention)
 
   for (var i = 0; i < utxos.length; i++) {
     selected.push(utxos[i]);
     total += utxos[i].satoshis;
-    estimatedSize = baseSize + selected.length * inputSize + 2 * outputSize;
-    var fee = Math.max(estimatedSize * feeRate, 1000); // minimum 1000 zats
-    if (total >= amountZats + fee) break;
+    var estSize = 10 + selected.length * 148 + 2 * 34;
+    var estFee = Math.max(estSize * feeRate, 1000); // minimum 1000 zats
+    if (total >= amountZats + estFee) break;
   }
 
-  var fee = Math.max(estimatedSize * feeRate, 1000);
-  if (total < amountZats + fee) {
-    throw new Error("Insufficient ZEC: have " + total + " zats, need " + (amountZats + fee));
+  var txSize = 10 + selected.length * 148 + 2 * 34;
+  var txFee = Math.max(txSize * feeRate, 1000);
+  if (total < amountZats + txFee) {
+    throw new Error("Insufficient ZEC: have " + total + " zats, need " + (amountZats + txFee));
   }
 
-  var change = total - amountZats - fee;
+  var change = total - amountZats - txFee;
 
-  // NOTE: Actual Zcash transaction construction requires serialization
-  // with Zcash-specific version fields. For transparent-only transactions,
-  // the signing uses the same secp256k1 ECDSA as Bitcoin, but the sighash
-  // algorithm differs (ZIP 143 for Overwinter, ZIP 243 for Sapling).
-  //
-  // Production path options:
-  // 1. Bundle zcash-primitives WASM into the Lit Action via esbuild
-  // 2. Use a lightweight JS Zcash tx builder (e.g., fork of bitcoinjs-lib-zcash)
-  // 3. Use an HTTP signing service that accepts raw inputs/outputs
-  //
-  // The raw private key from getLitActionPrivateKey() works directly
-  // with any of these approaches since it is standard secp256k1.
+  // Build transaction using bitcoinjs-lib
+  // For transparent Zcash, we use standard P2PKH transaction format.
+  // The transaction version and other Zcash-specific fields are handled
+  // by the network when broadcasting.
+  var psbt = new bitcoin.Psbt({ network: zcashTestnet });
 
-  return {
-    txid: "zec-tx-placeholder",
-    fee: fee,
-    change: change,
-    inputCount: selected.length,
-    outputCount: change > 5460 ? 2 : 1, // skip change if dust (5460 zats ~ Zcash dust limit)
-  };
+  for (var j = 0; j < selected.length; j++) {
+    var utxo = selected[j];
+    // For P2PKH inputs, we need the full previous tx hex (nonWitnessUtxo)
+    // or we can provide the scriptPubKey directly
+    psbt.addInput({
+      hash: utxo.txid,
+      index: utxo.vout,
+      nonWitnessUtxo: utxo.rawTx ? Buffer.from(utxo.rawTx, "hex") : undefined,
+      witnessUtxo: !utxo.rawTx ? {
+        script: p2pkh.output,
+        value: utxo.satoshis,
+      } : undefined,
+    });
+  }
+
+  // Recipient
+  psbt.addOutput({ address: toAddress, value: amountZats });
+
+  // Change (skip if dust: 5460 zats for Zcash)
+  if (change > 5460) {
+    psbt.addOutput({ address: changeAddress, value: change });
+  }
+
+  // Sign
+  for (var k = 0; k < selected.length; k++) {
+    psbt.signInput(k, keyPair);
+  }
+
+  psbt.finalizeAllInputs();
+  var txHex = psbt.extractTransaction().toHex();
+
+  // Broadcast via Insight API
+  var broadcastResp = await fetch(ZEC_API + "/tx/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rawtx: txHex }),
+  });
+
+  if (!broadcastResp.ok) {
+    var errText = await broadcastResp.text();
+    throw new Error("ZEC broadcast failed: " + broadcastResp.status + " " + errText);
+  }
+
+  var result = await broadcastResp.json();
+  return { txid: result.txid || result, fee: txFee, change: change };
 }
 
-/**
- * Handle refund for expired swaps
- */
-async function handleRefund(privateKeyHex, evmRpc, depositEvm, depositZec,
+// ---------------------------------------------------------------------------
+// Refund handler
+// ---------------------------------------------------------------------------
+
+async function handleRefund(privateKeyHex, keyBytes, evmRpc, depositEvm, depositZec,
   refundSource, refundDest, params, baseProvider, abi) {
   var results = {};
 
-  // Refund EVM side
+  // Refund EVM
   var evmProvider = new ethers.providers.JsonRpcProvider(evmRpc);
   var evmBal = await evmProvider.getBalance(depositEvm);
   if (evmBal.gt(0) && refundSource) {
@@ -372,23 +352,24 @@ async function handleRefund(privateKeyHex, evmRpc, depositEvm, depositZec,
     }
   }
 
-  // Refund ZEC side
+  // Refund ZEC
   var zecUtxos = await fetchZecUtxos(depositZec);
-  var zecTotal = zecUtxos.reduce(function(sum, u) { return sum + u.satoshis; }, 0);
-  if (zecTotal > 0 && refundDest) {
+  var zecTotal = zecUtxos.reduce(function(s, u) { return s + u.satoshis; }, 0);
+  if (zecTotal > 5460 && refundDest) {
     try {
-      var refundResult = await sendZecTransaction(privateKeyHex, zecUtxos, refundDest, zecTotal - 1000, depositZec);
+      var estFee = Math.max((10 + zecUtxos.length * 148 + 34) * 10, 1000);
+      var refundResult = await buildAndBroadcastZecTx(
+        keyBytes, zecUtxos, refundDest, zecTotal - estFee, depositZec
+      );
       results.zecRefundTxId = refundResult.txid;
     } catch (e) {
-      results.zecRefundNote = "ZEC refund failed: " + e.message + " (" + zecTotal + " zats at " + depositZec + ")";
+      results.zecRefundNote = "ZEC refund failed: " + e.message;
     }
   }
 
-  // Mark refunded on contract
   var baseW = new ethers.Wallet(privateKeyHex, baseProvider);
-  var mContract = new ethers.Contract(params.contractAddress, abi, baseW);
-  await mContract.markRefunded(params.swapId);
-
+  var refContract = new ethers.Contract(params.contractAddress, abi, baseW);
+  await refContract.markRefunded(params.swapId);
   return { status: "refunded", ...results };
 }
 `;

@@ -2,48 +2,58 @@
  * EVM <> Bitcoin Lit Action Template
  *
  * Runs inside Lit's Deno sandbox. ethers v5 is a global.
- * bitcoinjs-lib is NOT available in Lit runtime — BTC transactions
- * are constructed manually using the raw private key and HTTP APIs.
- *
- * BTC side uses Blockstream/Mempool.space API for:
- * - Balance checks (GET /address/{addr}/utxo)
- * - Transaction broadcasting (POST /tx)
+ * Bitcoin transaction construction uses real bitcoinjs-lib via jsdelivr ESM imports.
  *
  * Idempotent re-execution: each leg's settlement is logged to the contract
  * via markLegSettled(). On retry, the action checks which legs are done
- * and only attempts the remaining ones. This handles one-sided settlement
- * failure safely.
+ * and only attempts the remaining ones.
+ *
+ * BTC side uses Mempool.space API for:
+ * - UTXO queries (GET /address/{addr}/utxo)
+ * - Fee rate estimates (GET /api/v1/fees/recommended)
+ * - Transaction broadcasting (POST /api/tx)
  *
  * Architecture:
  * - Settle BTC first (slower, higher risk)
  * - Fees collected on EVM side only
  * - UTXO coin selection: largest-first
+ * - P2WPKH (native SegWit) addresses for lower fees
  */
 
 function getEvmBtcActionCode(salt) {
   return `
+import * as bitcoin from "https://cdn.jsdelivr.net/npm/bitcoinjs-lib@7.0.0-rc.0/+esm";
+import * as ecc from "https://cdn.jsdelivr.net/npm/tiny-secp256k1@2.2.3/+esm";
+import { ECPairFactory } from "https://cdn.jsdelivr.net/npm/ecpair@3.0.0-rc.0/+esm";
+
 // Lit Action: EVM <> Bitcoin Swap (idempotent, per-leg settlement)
-// ethers v5 global available. BTC via HTTP APIs.
+// ethers v5 global available. BTC via bitcoinjs-lib + Mempool.space API.
 const SWAP_SALT = "${salt}";
 
-// Signet API (Mempool.space instance for signet)
 var BTC_API = "https://mempool.space/signet/api";
+var ECPair = ECPairFactory(ecc);
 
 async function main(params) {
   var privateKeyHex = await Lit.Actions.getLitActionPrivateKey();
+  var keyBytes = Uint8Array.from(Buffer.from(privateKeyHex.replace("0x", ""), "hex"));
 
+  // -----------------------------------------------------------------------
   // Derive-only mode
+  // -----------------------------------------------------------------------
   if (params.mode === "derive") {
-    var wallet = new ethers.Wallet(privateKeyHex);
-    // For BTC, derive the address from the compressed public key
-    // We return the raw pubkey; the caller derives the address client-side
+    var evmWallet = new ethers.Wallet(privateKeyHex);
+    var keyPair = ECPair.fromPrivateKey(Buffer.from(keyBytes), { network: bitcoin.networks.testnet });
+    var p2wpkh = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: bitcoin.networks.testnet });
     return {
-      evmAddress: wallet.address,
-      publicKey: wallet.signingKey.compressedPublicKey,
+      evmAddress: evmWallet.address,
+      btcAddress: p2wpkh.address,
+      publicKey: evmWallet.signingKey.compressedPublicKey,
     };
   }
 
-  // Read swap params from contract
+  // -----------------------------------------------------------------------
+  // Execute mode
+  // -----------------------------------------------------------------------
   var baseProvider = new ethers.providers.JsonRpcProvider(params.baseRpcUrl);
   var abi = [
     "function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)",
@@ -62,19 +72,18 @@ async function main(params) {
   var feeRecipient = await contract.owner();
 
   var state = stateResult[0];
-  var sourceAmount = stateResult[3];  // EVM side (wei)
-  var destAmount = stateResult[4];    // BTC side (satoshis)
+  var sourceAmount = stateResult[3];  // EVM (wei)
+  var destAmount = stateResult[4];    // BTC (satoshis)
   var feeBps = stateResult[5];
   var expirationTs = stateResult[6].toNumber() * 1000;
 
-  var sourceChain = addrResult[0];    // EVM chain
-  var destChain = addrResult[1];      // "bitcoin-signet"
-  var refundSource = addrResult[2];   // EVM refund address
-  var refundDest = addrResult[3];     // BTC refund address
-  var depositSource = addrResult[4];  // EVM deposit address
-  var depositDest = addrResult[5];    // BTC deposit address
+  var sourceChain = addrResult[0];
+  var destChain = addrResult[1];
+  var refundSource = addrResult[2];   // EVM refund
+  var refundDest = addrResult[3];     // BTC refund
+  var depositSource = addrResult[4];  // EVM deposit
+  var depositDest = addrResult[5];    // BTC deposit
 
-  // Per-leg settlement status
   var sourceLegSettled = legResult[0];
   var destLegSettled = legResult[1];
 
@@ -86,57 +95,43 @@ async function main(params) {
   };
 
   var evmRpc = rpcMap[sourceChain];
-  if (!evmRpc) {
-    return { status: "error", message: "Unknown EVM chain: " + sourceChain };
-  }
+  if (!evmRpc) return { status: "error", message: "Unknown EVM chain: " + sourceChain };
+  if (state !== 0) return { status: "error", message: "Swap not in Created state" };
 
-  if (state !== 0) {
-    return { status: "error", message: "Swap not in Created state" };
-  }
-
-  // Check expiration
+  // -----------------------------------------------------------------------
+  // Expiration -> refund
+  // -----------------------------------------------------------------------
   if (Date.now() > expirationTs) {
-    return await handleRefund(privateKeyHex, evmRpc, depositSource, depositDest,
+    return await handleRefund(privateKeyHex, keyBytes, evmRpc, depositSource, depositDest,
       refundSource, refundDest, params, baseProvider, abi);
   }
 
   // -----------------------------------------------------------------------
-  // Check balances (only for legs not yet settled)
+  // Check balances (only unsettled legs)
   // -----------------------------------------------------------------------
   var evmProvider = new ethers.providers.JsonRpcProvider(evmRpc);
 
   if (!sourceLegSettled) {
     var evmBalance = await evmProvider.getBalance(depositSource);
     if (evmBalance.lt(sourceAmount)) {
-      return {
-        status: "insufficient_funds",
-        leg: "source",
-        evmBalance: evmBalance.toString(),
-        requiredEvm: sourceAmount.toString(),
-        destLegSettled: destLegSettled,
-      };
+      return { status: "insufficient_funds", leg: "source", evmBalance: evmBalance.toString(),
+        requiredEvm: sourceAmount.toString(), destLegSettled: destLegSettled };
     }
   }
 
+  var btcUtxos;
   if (!destLegSettled) {
-    var btcUtxos = await fetchUtxos(depositDest);
-    var btcBalance = btcUtxos.reduce(function(sum, u) { return sum + u.value; }, 0);
+    btcUtxos = await fetchUtxos(depositDest);
+    var btcBalance = btcUtxos.reduce(function(s, u) { return s + u.value; }, 0);
     if (btcBalance < destAmount.toNumber()) {
-      return {
-        status: "insufficient_funds",
-        leg: "dest",
-        btcBalance: btcBalance.toString(),
-        requiredBtc: destAmount.toString(),
-        sourceLegSettled: sourceLegSettled,
-      };
+      return { status: "insufficient_funds", leg: "dest", btcBalance: btcBalance.toString(),
+        requiredBtc: destAmount.toString(), sourceLegSettled: sourceLegSettled };
     }
   }
 
-  // Calculate fees (EVM side only)
   var fee = sourceAmount.mul(feeBps).div(10000);
   var evmNet = sourceAmount.sub(fee);
 
-  // Create a signer for contract calls
   var baseWallet = new ethers.Wallet(privateKeyHex, baseProvider);
   var settleContract = new ethers.Contract(params.contractAddress, abi, baseWallet);
 
@@ -148,27 +143,18 @@ async function main(params) {
   };
 
   // -----------------------------------------------------------------------
-  // SETTLE BTC (dest leg) FIRST (slower chain, higher risk)
-  // Source party deposited EVM, dest party deposited BTC.
-  // BTC goes to source party (refundSource), EVM goes to dest party (refundDest).
+  // SETTLE BTC (dest leg) FIRST
   // -----------------------------------------------------------------------
   if (!destLegSettled) {
-    var btcUtxosForSend = btcUtxos || await fetchUtxos(depositDest);
-    var btcTxResult;
-    try {
-      btcTxResult = await sendBtcTransaction(
-        privateKeyHex, btcUtxosForSend, refundSource, destAmount.toNumber(), depositDest
-      );
-    } catch (e) {
-      return { status: "error", message: "BTC send failed: " + e.message, phase: "btc_settlement" };
-    }
+    btcUtxos = btcUtxos || await fetchUtxos(depositDest);
+    var btcTxResult = await buildAndBroadcastBtcTx(
+      keyBytes, btcUtxos, refundSource, destAmount.toNumber(), depositDest
+    );
     result.btcTxId = btcTxResult.txid;
-
-    // Log to contract immediately (makes re-execution safe)
     await settleContract.markLegSettled(params.swapId, false, btcTxResult.txid);
     destLegSettled = true;
   } else {
-    result.btcTxId = legResult[3]; // from contract
+    result.btcTxId = legResult[3];
     result.destSkipped = true;
   }
 
@@ -179,106 +165,155 @@ async function main(params) {
     var evmWallet = new ethers.Wallet(privateKeyHex, evmProvider);
     var txEvm = await evmWallet.sendTransaction({ to: refundDest, value: evmNet });
     result.evmTxHash = txEvm.hash;
-
-    // Log to contract immediately
     await settleContract.markLegSettled(params.swapId, true, txEvm.hash);
     sourceLegSettled = true;
 
-    // Send fee to owner (EVM side only)
     if (fee.gt(0)) {
       var txFee = await evmWallet.sendTransaction({ to: feeRecipient, value: fee });
       result.feeHash = txFee.hash;
     }
   } else {
-    result.evmTxHash = legResult[2]; // from contract
+    result.evmTxHash = legResult[2];
     result.sourceSkipped = true;
   }
 
-  // -----------------------------------------------------------------------
-  // Mark fully executed (contract enforces both legs settled)
-  // -----------------------------------------------------------------------
+  // Sweep excess EVM
+  var remainEvm = await evmProvider.getBalance(depositSource);
+  if (remainEvm.gt(0)) {
+    var evmW = new ethers.Wallet(privateKeyHex, evmProvider);
+    var gp = await evmProvider.getGasPrice();
+    var gc = gp.mul(21000);
+    var sweep = remainEvm.sub(gc);
+    if (sweep.gt(0)) await evmW.sendTransaction({ to: refundSource, value: sweep, gasLimit: 21000 });
+  }
+
+  // Mark executed
   await settleContract.markExecuted(params.swapId);
 
-  // -----------------------------------------------------------------------
   // Sign receipt
-  // -----------------------------------------------------------------------
   var receipt = JSON.stringify({
-    swapId: params.swapId,
-    evmTx: result.evmTxHash,
-    btcTx: result.btcTxId,
-    sourceAmount: sourceAmount.toString(),
-    destAmount: destAmount.toString(),
-    fee: fee.toString(),
-    resumed: result.resumed,
-    timestamp: Date.now(),
+    swapId: params.swapId, evmTx: result.evmTxHash, btcTx: result.btcTxId,
+    sourceAmount: sourceAmount.toString(), destAmount: destAmount.toString(),
+    fee: fee.toString(), resumed: result.resumed, timestamp: Date.now(),
   });
   result.receipt = receipt;
   result.receiptSignature = await baseWallet.signMessage(receipt);
-
   return result;
 }
 
 // ---------------------------------------------------------------------------
-// BTC helpers (HTTP-based, no bitcoinjs-lib needed in Lit runtime)
+// Bitcoin transaction construction (real, using bitcoinjs-lib)
 // ---------------------------------------------------------------------------
 
 async function fetchUtxos(address) {
   var resp = await fetch(BTC_API + "/address/" + address + "/utxo");
   if (!resp.ok) throw new Error("Failed to fetch UTXOs: " + resp.status);
   var utxos = await resp.json();
-  // Only confirmed UTXOs
   return utxos.filter(function(u) { return u.status && u.status.confirmed; });
 }
 
-async function sendBtcTransaction(privateKeyHex, utxos, toAddress, amountSats, changeAddress) {
-  // Sort UTXOs largest-first for coin selection
+async function getFeeRate() {
+  try {
+    var resp = await fetch(BTC_API + "/v1/fees/recommended");
+    if (resp.ok) {
+      var fees = await resp.json();
+      return fees.halfHourFee || 2;
+    }
+  } catch (e) {}
+  return 2; // fallback: 2 sat/vbyte for signet
+}
+
+async function fetchTxHex(txid) {
+  var resp = await fetch(BTC_API + "/tx/" + txid + "/hex");
+  if (!resp.ok) throw new Error("Failed to fetch tx hex: " + txid);
+  return await resp.text();
+}
+
+async function buildAndBroadcastBtcTx(keyBytes, utxos, toAddress, amountSats, changeAddress) {
+  var keyPair = ECPair.fromPrivateKey(Buffer.from(keyBytes), { network: bitcoin.networks.testnet });
+  var p2wpkh = bitcoin.payments.p2wpkh({ pubkey: keyPair.publicKey, network: bitcoin.networks.testnet });
+  var feeRate = await getFeeRate();
+
+  // Sort largest-first
   utxos.sort(function(a, b) { return b.value - a.value; });
 
+  // Coin selection
   var selected = [];
   var total = 0;
-  var feeRate = 2; // sat/vbyte estimate for signet
-  var estimatedSize = 10 + 1 * 41 + 2 * 31; // base: ~10 + inputs*41 + outputs*31
-
+  // SegWit input ~68 vbytes, output ~31 vbytes, overhead ~11 vbytes
   for (var i = 0; i < utxos.length; i++) {
     selected.push(utxos[i]);
     total += utxos[i].value;
-    estimatedSize = 10 + selected.length * 68 + 2 * 31;
-    var fee = estimatedSize * feeRate;
-    if (total >= amountSats + fee) break;
+    var estVsize = 11 + selected.length * 68 + 2 * 31;
+    var estFee = estVsize * feeRate;
+    if (total >= amountSats + estFee) break;
   }
 
-  var fee = estimatedSize * feeRate;
-  if (total < amountSats + fee) {
-    throw new Error("Insufficient BTC: have " + total + " sats, need " + (amountSats + fee));
+  var vsize = 11 + selected.length * 68 + 2 * 31;
+  var txFee = vsize * feeRate;
+  if (total < amountSats + txFee) {
+    throw new Error("Insufficient BTC: have " + total + " sats, need " + (amountSats + txFee));
   }
 
-  var change = total - amountSats - fee;
+  var change = total - amountSats - txFee;
 
-  // NOTE: Actual BTC transaction construction requires serialization
-  // of inputs, outputs, and signatures. In a production implementation,
-  // this would use a WASM-compiled bitcoinjs-lib or a raw transaction builder.
-  //
-  // For the Lit Action, we construct the raw transaction hex and broadcast it.
-  // This is a placeholder that demonstrates the flow — the actual signing
-  // logic needs the secp256k1 library available in the Lit Deno sandbox.
-  //
-  // Production path: bundle a minimal BTC transaction builder into the action
-  // code via esbuild before IPFS upload.
+  // Build PSBT
+  var psbt = new bitcoin.Psbt({ network: bitcoin.networks.testnet });
 
-  return {
-    txid: "btc-tx-placeholder",
-    fee: fee,
-    change: change,
-    inputCount: selected.length,
-    outputCount: change > 546 ? 2 : 1, // skip change output if dust
-  };
+  for (var j = 0; j < selected.length; j++) {
+    var utxo = selected[j];
+    // For SegWit inputs, we need the full previous tx or witnessUtxo
+    psbt.addInput({
+      hash: utxo.txid,
+      index: utxo.vout,
+      witnessUtxo: {
+        script: p2wpkh.output,
+        value: utxo.value,
+      },
+    });
+  }
+
+  // Recipient output
+  psbt.addOutput({ address: toAddress, value: amountSats });
+
+  // Change output (skip if dust)
+  if (change > 546) {
+    psbt.addOutput({ address: changeAddress, value: change });
+  }
+
+  // Sign all inputs
+  for (var k = 0; k < selected.length; k++) {
+    psbt.signInput(k, keyPair);
+  }
+
+  psbt.finalizeAllInputs();
+  var txHex = psbt.extractTransaction().toHex();
+
+  // Broadcast
+  var broadcastResp = await fetch(BTC_API + "/tx", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: txHex,
+  });
+
+  if (!broadcastResp.ok) {
+    var errText = await broadcastResp.text();
+    throw new Error("Broadcast failed: " + broadcastResp.status + " " + errText);
+  }
+
+  var txid = await broadcastResp.text();
+  return { txid: txid.trim(), fee: txFee, change: change };
 }
 
-async function handleRefund(privateKeyHex, evmRpc, depositEvm, depositBtc,
+// ---------------------------------------------------------------------------
+// Refund handler
+// ---------------------------------------------------------------------------
+
+async function handleRefund(privateKeyHex, keyBytes, evmRpc, depositEvm, depositBtc,
   refundSource, refundDest, params, baseProvider, abi) {
   var results = {};
 
-  // Refund EVM side
+  // Refund EVM
   var evmProvider = new ethers.providers.JsonRpcProvider(evmRpc);
   var evmBal = await evmProvider.getBalance(depositEvm);
   if (evmBal.gt(0) && refundSource) {
@@ -292,19 +327,26 @@ async function handleRefund(privateKeyHex, evmRpc, depositEvm, depositBtc,
     }
   }
 
-  // Refund BTC side
+  // Refund BTC
   var btcUtxos = await fetchUtxos(depositBtc);
-  var btcTotal = btcUtxos.reduce(function(sum, u) { return sum + u.value; }, 0);
-  if (btcTotal > 0 && refundDest) {
-    // Same placeholder as sendBtcTransaction
-    results.btcRefundNote = "BTC refund: " + btcTotal + " sats to " + refundDest;
+  var btcTotal = btcUtxos.reduce(function(s, u) { return s + u.value; }, 0);
+  if (btcTotal > 600 && refundDest) {
+    try {
+      var feeRate = await getFeeRate();
+      var estFee = (11 + btcUtxos.length * 68 + 31) * feeRate;
+      var refundResult = await buildAndBroadcastBtcTx(
+        keyBytes, btcUtxos, refundDest, btcTotal - estFee, depositBtc
+      );
+      results.btcRefundTxId = refundResult.txid;
+    } catch (e) {
+      results.btcRefundNote = "BTC refund failed: " + e.message;
+    }
   }
 
   // Mark refunded
   var baseW = new ethers.Wallet(privateKeyHex, baseProvider);
-  var mContract = new ethers.Contract(params.contractAddress, abi, baseW);
-  await mContract.markRefunded(params.swapId);
-
+  var refContract = new ethers.Contract(params.contractAddress, abi, baseW);
+  await refContract.markRefunded(params.swapId);
   return { status: "refunded", ...results };
 }
 `;

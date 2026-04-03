@@ -108,8 +108,16 @@ export function createLitRuntime(opts = {}) {
           funcs[name] = async () => contractState.swapState;
         } else if (name === 'getSwapAddresses' && contractState.swapAddresses) {
           funcs[name] = async () => contractState.swapAddresses;
+        } else if (name === 'getSwapLegs' && contractState.swapLegs) {
+          funcs[name] = async () => contractState.swapLegs;
         } else if (name === 'owner' && contractState.owner) {
           funcs[name] = async () => contractState.owner;
+        } else if (name === 'markLegSettled') {
+          funcs[name] = async (swapId, isSourceLeg, txHash) => {
+            const hash = '0x' + crypto.randomBytes(32).toString('hex');
+            sentTxs.push({ hash, type: 'markLegSettled', swapId, isSourceLeg, txHash });
+            return { hash, wait: async () => ({ blockNumber: 1 }) };
+          };
         } else if (name === 'markExecuted' || name === 'markRefunded') {
           funcs[name] = async (swapId) => {
             const hash = '0x' + crypto.randomBytes(32).toString('hex');
