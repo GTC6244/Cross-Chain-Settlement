@@ -15,12 +15,23 @@ The Lit Action's private key exists only inside the Lit network's threshold cryp
 
 ## Chain pairs
 
-| Pair | Status | Action file |
-|------|--------|-------------|
-| EVM <> EVM | Working | `app/actions/evm-evm-action.js` |
-| EVM <> Bitcoin | Template ready | `app/actions/evm-btc-action.js` |
-| EVM <> Zcash | Template ready | `app/actions/evm-zec-action.js` |
-| Bitcoin <> Zcash | Template ready | `app/actions/btc-zec-action.js` |
+Eleven pairs across EVM, Bitcoin, Litecoin, Dogecoin, Zcash (transparent), and Solana. All share one chain-agnostic settlement engine (`app/actions/lib/engine.js`) and per-chain leg drivers.
+
+| Pair | Signing | Verification status | Action file |
+|------|---------|---------------------|-------------|
+| EVM <> EVM | micro-eth-signer | settlement logic tested | `app/actions/evm-evm-action.js` |
+| EVM <> Bitcoin | micro-eth-signer + @scure/btc-signer | needs testnet | `app/actions/evm-btc-action.js` |
+| EVM <> Zcash | micro-eth-signer + ZIP-243 shim | **ZEC unverified** | `app/actions/evm-zec-action.js` |
+| Bitcoin <> Zcash | @scure/btc-signer + ZIP-243 shim | **ZEC unverified** | `app/actions/btc-zec-action.js` |
+| Bitcoin <> Litecoin | @scure/btc-signer | needs testnet | `app/actions/btc-ltc-action.js` |
+| Bitcoin <> Dogecoin | @scure/btc-signer (legacy P2PKH) | needs testnet + DOGE API | `app/actions/btc-doge-action.js` |
+| EVM <> Solana | micro-eth-signer + micro-sol-signer | needs devnet | `app/actions/evm-sol-action.js` |
+| Bitcoin <> Solana | @scure/btc-signer + micro-sol-signer | needs testnet/devnet | `app/actions/btc-sol-action.js` |
+| Zcash <> Solana | ZIP-243 shim + micro-sol-signer | **ZEC unverified** | `app/actions/zec-sol-action.js` |
+| Zcash <> Litecoin | ZIP-243 shim + @scure/btc-signer | **ZEC unverified** | `app/actions/zec-ltc-action.js` |
+| Zcash <> Dogecoin | ZIP-243 shim + @scure/btc-signer | **ZEC unverified** | `app/actions/zec-doge-action.js` |
+
+The chain-agnostic settlement state machine (`runSwap`) is exercised by `test/engine.test.js`. The in-sandbox signing/broadcast for each chain runs only in the Lit runtime and requires live-testnet verification before production use.
 
 ## Architecture
 
@@ -75,9 +86,12 @@ RE-EXECUTION:
 
 **Contract invariants:**
 - Can't settle the same leg twice (`"source leg already settled"`)
+- Can't pay the fee twice (`"fee already settled"`)
 - Can't mark executed without both legs (`"source leg not settled"`)
 - Can't settle legs on an already-executed swap (`"invalid state"`)
 - Only the Lit Action's address can call any settlement function (`"not lit action"`)
+
+**Crash hardening:** every EVM transaction (the Base contract writes and EVM value transfers) is awaited to inclusion (`waitForTransaction`) and throws on revert, so the state machine never advances on an unmined tx. The fee is logged on-chain (`markFeeSettled`) independently of the legs, so a crash between a leg settling and the fee being paid is recovered on re-execution. If an expiry refund's drains hard-fail (e.g. RPC down), the swap is left `Created` (status `refund_incomplete`) rather than finalized, so funds are never stranded in a terminal `Refunded` state.
 
 The contract stores the tx hash for each leg, making every settlement step auditable.
 
@@ -88,10 +102,13 @@ Static HTML + vanilla JS. No build step. No framework. No backend.
 ```
 app/
   index.html        # UI with 5 tabs
-  swap-engine.js    # All swap logic (33KB)
+  swap-engine.js    # All swap logic
+  actions/          # audited action templates + lib/ (loaded as ES modules)
 ```
 
 Tabs: **Create** | **Status** | **Execute** | **Gas Preview** | **Verify CID**
+
+A small `<script type="module">` in `index.html` imports the action-template generators and exposes them on `window.ActionTemplates`; the classic `swap-engine.js` dispatches to them by pair. (Loading those modules does not fetch jsDelivr — the jsDelivr imports live only inside the generated action strings.)
 
 The browser talks directly to Base RPC, Lit Chipotle API, and the user's wallet (MetaMask).
 
@@ -100,7 +117,7 @@ The browser talks directly to Base RPC, Lit Chipotle API, and the user's wallet 
 ```
 contracts/
   src/SwapContract.sol    # Swap state machine on Base
-  test/SwapContract.t.sol # 35 Foundry tests
+  test/SwapContract.t.sol # 39 Foundry tests
 ```
 
 State machine: `Created -> Executed | Refunded`
@@ -108,40 +125,58 @@ State machine: `Created -> Executed | Refunded`
 Key functions:
 - `createSwap(...)` records swap intent with all parameters
 - `markLegSettled(swapId, isSourceLeg, txHash)` logs each leg's completion
+- `markFeeSettled(swapId, txHash)` logs fee payment separately, so a crash between a leg settling and the fee being paid is recoverable (the action re-sends the fee only if this flag is unset)
 - `markExecuted(swapId)` finalizes (requires both legs settled)
 - `markRefunded(swapId)` handles expired swaps (allowed even after partial settlement)
-- `getSwapLegs(swapId)` returns per-leg settlement status and tx hashes
+- `getSwapLegs(swapId)` / `getFeeStatus(swapId)` return per-leg and fee settlement status + tx hashes
 
 Supports native tokens and ERC-20 (token address fields, `address(0)` = native).
 
 ## Lit Actions
 
-Four action templates, one per swap type. Each is a standalone JavaScript file that runs inside Lit's Deno sandbox. Per-swap uniqueness via salt injection before IPFS upload (unique CID = unique key = unique deposit addresses).
+Each action is assembled (per swap, with salt injection → unique CID → unique key → unique deposit addresses) from a set of shared snippet generators, then deployed to IPFS and run inside Lit's Deno sandbox.
 
 ```
 app/actions/
-  evm-evm-action.js   # EVM <> EVM    — ethers v5 on both sides
-  evm-btc-action.js   # EVM <> BTC    — ethers + Mempool.space API
-  evm-zec-action.js   # EVM <> Zcash  — ethers + Insight/Blockchair API
-  btc-zec-action.js   # BTC <> Zcash  — both UTXO, no EVM leg
+  evm-evm-action.js  evm-btc-action.js  evm-zec-action.js  btc-zec-action.js
+  btc-ltc-action.js  btc-doge-action.js evm-sol-action.js  btc-sol-action.js
+  zec-sol-action.js  zec-ltc-action.js  zec-doge-action.js
+  lib/
+    assemble.js    # composes imports + engine + leg drivers + main()
+    networks.js    # chain registry (network params, APIs, dust, fees)
+    imports.js     # pinned jsDelivr ESM import lines
+    engine.js      # chain-agnostic runSwap state machine + EVM leg
+    utxo-leg.js    # BTC/LTC/DOGE leg + pure coin-selection math
+    zec-leg.js     # Zcash transparent leg (ZIP-243 sighash shim)
+    sol-leg.js     # Solana leg
 ```
 
-All actions have two modes:
-- `mode: "derive"` returns deposit addresses (used during swap creation)
-- `mode: "execute"` runs the full swap lifecycle with per-leg idempotency
+Each pair file is a thin wrapper that picks the source/dest chains, settle order, and fee placement; the assembler emits a self-contained action string. Action code can only import from jsDelivr, so the shared logic is composed in as code strings (not runtime imports).
+
+### Signing — audited libraries only
+
+All signing uses Paul Miller's audited, pure-JS, zero-dependency [noble/scure/micro](https://paulmillr.com/noble/) family (replacing the earlier `bitcoinjs-lib`/`tiny-secp256k1`/`ecpair` and `ethers` signing):
+
+- **`@scure/btc-signer`** — Bitcoin / Litecoin / Dogecoin transaction construction (custom network params; SegWit P2WPKH, or legacy P2PKH with `nonWitnessUtxo`)
+- **`micro-eth-signer`** — EVM transaction + EIP-191 receipt signing (the `ethers` global is used only for read-only RPC, nonce, gas, and broadcast)
+- **`micro-sol-signer`** — Solana, using the action's 32-byte key as an Ed25519 seed (same secret as the secp256k1 side, different address — no dependency on Lit's roadmap Ed25519 signing)
+- **`@noble/hashes` + `@noble/curves` + `@scure/base`** — the Zcash ZIP-243 transparent sighash shim (BLAKE2b + secp256k1 + base58check), since no library does Zcash sighash natively
+
+All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "execute"` runs the full lifecycle with per-leg idempotency.
 
 **Security:** actions read ALL params from the on-chain contract. Only `swapId`, `baseRpcUrl`, and `contractAddress` are passed via `js_params`.
 
-**Settlement order:** slower/riskier chain always settles first. After each leg, the action logs to the contract before proceeding. On re-execution, settled legs are skipped.
+**Settlement order:** slower/riskier chain settles first. After each leg, the action logs to the contract before proceeding; on re-execution, settled legs are skipped.
 
 **Chain-specific details:**
 
-| Action | Settlement order | Fee collection | UTXO API | Dust limit |
-|--------|-----------------|----------------|----------|------------|
-| EVM<>EVM | Either (both fast) | Source EVM side | N/A | N/A |
-| EVM<>BTC | BTC first | EVM side | Mempool.space | 546 sats |
-| EVM<>ZEC | ZEC first | EVM side | Insight + Blockchair fallback | 5460 zats |
-| BTC<>ZEC | BTC first | ZEC side (no EVM leg) | Both APIs | 546 sats / 5460 zats |
+| Chain | Address | API | Dust | Notes |
+|-------|---------|-----|------|-------|
+| Bitcoin (signet) | P2WPKH SegWit | mempool.space esplora | 546 sat | |
+| Litecoin (testnet) | P2WPKH SegWit | litecoinspace.org esplora | 546 lit | |
+| Dogecoin (testnet) | legacy P2PKH | blockchair | ~0.01 DOGE | testnet API base is a placeholder — confirm before use |
+| Zcash (testnet) | transparent t-addr | Insight + Blockchair | 5460 zat | **ZIP-243 v4 shim — unverified; branch id must match active upgrade** |
+| Solana (devnet) | Ed25519 | Solana JSON-RPC | — | seed = same 32-byte action key |
 
 ## Features
 
@@ -156,17 +191,20 @@ All actions have two modes:
 ## Testing
 
 ```bash
-# Solidity (35 tests)
+# Solidity (39 tests)
 cd contracts && forge test
 
-# Lit Action logic (9 tests)
-node test/evm-evm-action.test.js
+# Lit Action logic (43 tests, Node 22+)
+node test/engine.test.js          # real runSwap state machine, mock legs (18)
+node test/utxo-math.test.js       # coin selection / fee math (8)
+node test/evm-evm-action.test.js  # settlement flow (9)
+node test/evm-btc-action.test.js  # settlement flow (8)
 
-# Key primitive validation
-node spike/btc-key-validation.js
+# Assemble + syntax-check all 11 action templates
+node test/_gen.mjs && for f in /tmp/genactions/*.mjs; do node --check "$f"; done
 ```
 
-The test harness (`test/lit-harness.js`) mocks the Lit runtime so action code can be unit-tested without hitting the live network. Contract tests cover the full per-leg settlement lifecycle including partial settlement, double-settle prevention, and re-execution scenarios.
+`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions. The in-sandbox crypto (the signers and the ZIP-243 shim) runs only in the Lit runtime and is **not** covered by these tests — it needs live-testnet verification. Contract tests cover the full per-leg settlement lifecycle.
 
 ## Setup
 
@@ -188,7 +226,7 @@ cd app && python3 -m http.server 8899
 
 Update `CONTRACT_ADDRESS` in `app/swap-engine.js` after deployment.
 
-**For running tests only** (optional): Node.js 22+ and `npm install` are needed for the test harness and key validation spike.
+**For running tests only** (optional): Node.js 22+ (ESM auto-detection). The engine and UTXO-math tests use only Node built-ins; the older harness-based tests import `ethers`.
 
 ## Security model
 
