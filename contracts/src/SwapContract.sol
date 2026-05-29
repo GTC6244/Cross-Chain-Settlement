@@ -57,6 +57,11 @@ contract SwapContract {
         bool destLegSettled;
         string sourceLegTxHash;  // chain-specific tx hash for source leg
         string destLegTxHash;    // chain-specific tx hash for dest leg
+
+        // Fee settlement tracking (separate from legs so a crash between a leg
+        // settling and the fee being paid is recoverable on re-execution).
+        bool feeSettled;
+        string feeTxHash;
     }
 
     address public owner;
@@ -76,6 +81,7 @@ contract SwapContract {
     event SwapRefunded(uint256 indexed swapId);
     event SwapExpired(uint256 indexed swapId);
     event LegSettled(uint256 indexed swapId, bool isSourceLeg, string txHash);
+    event FeeSettled(uint256 indexed swapId, string txHash);
 
     modifier onlyOwner() {
         require(msg.sender == owner, "not owner");
@@ -202,6 +208,26 @@ contract SwapContract {
     }
 
     /**
+     * @notice Record that the fee has been paid to the owner. Tracked
+     *         separately from the legs so a crash between a leg settling and the
+     *         fee transfer is recoverable: on re-execution the action checks
+     *         this flag and only re-sends the fee if it wasn't recorded.
+     * @param swapId The swap ID
+     * @param txHash The fee transfer tx hash (for auditability)
+     */
+    function markFeeSettled(uint256 swapId, string calldata txHash)
+        external
+        onlyLitAction(swapId)
+        inState(swapId, SwapState.Created)
+    {
+        Swap storage s = swaps[swapId];
+        require(!s.feeSettled, "fee already settled");
+        s.feeSettled = true;
+        s.feeTxHash = txHash;
+        emit FeeSettled(swapId, txHash);
+    }
+
+    /**
      * @notice Mark a swap as fully executed. Requires both legs settled.
      *         Called by the Lit Action after both transfers complete.
      */
@@ -294,6 +320,17 @@ contract SwapContract {
             s.sourceLegTxHash,
             s.destLegTxHash
         );
+    }
+
+    /**
+     * @notice Get fee settlement status (for idempotent fee recovery)
+     */
+    function getFeeStatus(uint256 swapId) external view returns (
+        bool feeSettled,
+        string memory feeTxHash
+    ) {
+        Swap storage s = swaps[swapId];
+        return (s.feeSettled, s.feeTxHash);
     }
 
     /**

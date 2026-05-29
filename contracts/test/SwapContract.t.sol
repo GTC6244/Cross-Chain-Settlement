@@ -195,6 +195,47 @@ contract SwapContractTest is Test {
         swap.markLegSettled(swapId, true, "0xabc");
     }
 
+    // -----------------------------------------------------------------------
+    // markFeeSettled
+    // -----------------------------------------------------------------------
+
+    function test_markFeeSettled() public {
+        uint256 swapId = _createTestSwap();
+        (bool before,) = swap.getFeeStatus(swapId);
+        assertFalse(before);
+
+        vm.prank(litActionAddr);
+        swap.markFeeSettled(swapId, "0xFeeTx");
+
+        (bool settled, string memory feeTx) = swap.getFeeStatus(swapId);
+        assertTrue(settled);
+        assertEq(feeTx, "0xFeeTx");
+    }
+
+    function test_markFeeSettled_revert_alreadySettled() public {
+        uint256 swapId = _createTestSwap();
+        vm.startPrank(litActionAddr);
+        swap.markFeeSettled(swapId, "0xFeeTx");
+        vm.expectRevert("fee already settled");
+        swap.markFeeSettled(swapId, "0xFeeTx2");
+        vm.stopPrank();
+    }
+
+    function test_markFeeSettled_revert_notLitAction() public {
+        uint256 swapId = _createTestSwap();
+        vm.prank(alice);
+        vm.expectRevert("not lit action");
+        swap.markFeeSettled(swapId, "0xFeeTx");
+    }
+
+    function test_markFeeSettled_emitsEvent() public {
+        uint256 swapId = _createTestSwap();
+        vm.expectEmit(true, false, false, true);
+        emit SwapContract.FeeSettled(swapId, "0xFeeTx");
+        vm.prank(litActionAddr);
+        swap.markFeeSettled(swapId, "0xFeeTx");
+    }
+
     function test_markLegSettled_revert_notLitAction() public {
         uint256 swapId = _createTestSwap();
         vm.prank(alice);
