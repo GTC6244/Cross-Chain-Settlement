@@ -107,189 +107,53 @@ function clearLog(boxId) {
   box.style.display = 'none';
 }
 
+
 // ---------------------------------------------------------------------------
-// Lit Action Templates
+// Action template dispatch
 // ---------------------------------------------------------------------------
+// The audited per-pair generators live in app/actions/*.js and are exposed on
+// window.ActionTemplates by a module script in index.html.
 
-/**
- * EVM <> EVM Lit Action code.
- * NOTE: This runs inside Lit's Deno sandbox with ethers v5 globals.
- * The action reads swap params from the Base contract (only swapId via js_params).
- */
-function getEvmEvmActionCode(salt) {
-  return `
-// Lit Action: EVM <> EVM Swap
-// ethers v5 is available as a global in the Lit runtime.
-// getLitActionPrivateKey() returns 32 raw bytes for this action's unique key.
-const SWAP_SALT = "${salt}";
+const CHAIN_FAMILY = {
+  'base-sepolia': 'evm', 'ethereum-sepolia': 'evm', 'arbitrum-sepolia': 'evm', 'optimism-sepolia': 'evm',
+  'bitcoin-signet': 'btc', 'litecoin-testnet': 'ltc', 'dogecoin-testnet': 'doge',
+  'zcash-testnet': 'zec', 'solana-devnet': 'sol',
+};
 
-async function main(params) {
-  var privateKeyHex = await Lit.Actions.getLitActionPrivateKey();
+// Family pair -> registered template key (direction-independent).
+const TEMPLATE_BY_FAMILIES = {
+  'evm,evm': 'evm-evm',
+  'evm,btc': 'evm-btc', 'btc,evm': 'evm-btc',
+  'evm,zec': 'evm-zec', 'zec,evm': 'evm-zec',
+  'btc,zec': 'btc-zec', 'zec,btc': 'btc-zec',
+  'btc,ltc': 'btc-ltc', 'ltc,btc': 'btc-ltc',
+  'btc,doge': 'btc-doge', 'doge,btc': 'btc-doge',
+  'evm,sol': 'evm-sol', 'sol,evm': 'evm-sol',
+  'btc,sol': 'btc-sol', 'sol,btc': 'btc-sol',
+  'zec,sol': 'zec-sol', 'sol,zec': 'zec-sol',
+  'zec,ltc': 'zec-ltc', 'ltc,zec': 'zec-ltc',
+  'zec,doge': 'zec-doge', 'doge,zec': 'zec-doge',
+};
 
-  // Derive-only mode: just return addresses
-  if (params.mode === "derive") {
-    var wallet = new ethers.Wallet(privateKeyHex);
-    return {
-      evmAddress: wallet.address,
-      publicKey: wallet.signingKey.compressedPublicKey,
-    };
-  }
-
-  // Read swap params from contract (security: don't trust js_params for amounts/addresses)
-  var baseProvider = new ethers.providers.JsonRpcProvider(params.baseRpcUrl);
-  var abi = [
-    "function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)",
-    "function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,uint256)",
-    "function owner() view returns (address)"
-  ];
-  var contract = new ethers.Contract(params.contractAddress, abi, baseProvider);
-
-  var stateResult = await contract.getSwapState(params.swapId);
-  var addrResult = await contract.getSwapAddresses(params.swapId);
-  var feeRecipient = await contract.owner();
-
-  var state = stateResult[0];
-  var sourceAmount = stateResult[3];
-  var destAmount = stateResult[4];
-  var feeBps = stateResult[5];
-  var expirationTs = stateResult[6].toNumber() * 1000;
-
-  var sourceChain = addrResult[0];
-  var destChain = addrResult[1];
-  var refundSource = addrResult[2];
-  var refundDest = addrResult[3];
-  var depositSource = addrResult[4];
-  var depositDest = addrResult[5];
-
-  // Map chains to RPC URLs
-  var rpcMap = {
-    "base-sepolia": "https://sepolia.base.org",
-    "ethereum-sepolia": "https://rpc.sepolia.org",
-    "arbitrum-sepolia": "https://sepolia-rollup.arbitrum.io/rpc",
-    "optimism-sepolia": "https://sepolia.optimism.io",
-  };
-
-  var sourceRpc = rpcMap[sourceChain];
-  var destRpc = rpcMap[destChain];
-
-  if (!sourceRpc || !destRpc) {
-    return { status: "error", message: "Unknown chain: " + sourceChain + " or " + destChain };
-  }
-
-  // Check contract state
-  if (state !== 0) {
-    return { status: "error", message: "Swap not in Created state (state=" + state + ")" };
-  }
-
-  // 1. Check expiration
-  if (Date.now() > expirationTs) {
-    var refResults = {};
-    var srcProv = new ethers.providers.JsonRpcProvider(sourceRpc);
-    var srcBal = await srcProv.getBalance(depositSource);
-    if (srcBal.gt(0) && refundSource) {
-      var w = new ethers.Wallet(privateKeyHex, srcProv);
-      var gp = await srcProv.getGasPrice();
-      var gc = gp.mul(21000);
-      var ra = srcBal.sub(gc);
-      if (ra.gt(0)) {
-        var tx = await w.sendTransaction({ to: refundSource, value: ra, gasLimit: 21000 });
-        refResults.sourceRefundHash = tx.hash;
-      }
-    }
-    var dstProv = new ethers.providers.JsonRpcProvider(destRpc);
-    var dstBal = await dstProv.getBalance(depositDest);
-    if (dstBal.gt(0) && refundDest) {
-      var w2 = new ethers.Wallet(privateKeyHex, dstProv);
-      var gp2 = await dstProv.getGasPrice();
-      var gc2 = gp2.mul(21000);
-      var ra2 = dstBal.sub(gc2);
-      if (ra2.gt(0)) {
-        var tx2 = await w2.sendTransaction({ to: refundDest, value: ra2, gasLimit: 21000 });
-        refResults.destRefundHash = tx2.hash;
-      }
-    }
-    // Mark refunded on contract
-    var baseWallet = new ethers.Wallet(privateKeyHex, baseProvider);
-    var markAbi = ["function markRefunded(uint256)"];
-    var markContract = new ethers.Contract(params.contractAddress, markAbi, baseWallet);
-    await markContract.markRefunded(params.swapId);
-    return { status: "refunded", ...refResults };
-  }
-
-  // 2. Check balances
-  var srcProvider = new ethers.providers.JsonRpcProvider(sourceRpc);
-  var dstProvider = new ethers.providers.JsonRpcProvider(destRpc);
-  var srcBalance = await srcProvider.getBalance(depositSource);
-  var dstBalance = await dstProvider.getBalance(depositDest);
-
-  if (srcBalance.lt(sourceAmount) || dstBalance.lt(destAmount)) {
-    return {
-      status: "insufficient_funds",
-      sourceBalance: srcBalance.toString(),
-      destBalance: dstBalance.toString(),
-      requiredSource: sourceAmount.toString(),
-      requiredDest: destAmount.toString(),
-    };
-  }
-
-  // 3. Calculate fees (rear-loaded, EVM side only)
-  var fee = sourceAmount.mul(feeBps).div(10000);
-  var sourceNet = sourceAmount.sub(fee);
-
-  // 4. Execute: send source funds to dest party (refundDest = dest party's address)
-  var srcWallet = new ethers.Wallet(privateKeyHex, srcProvider);
-  var txSrc = await srcWallet.sendTransaction({ to: refundDest, value: sourceNet });
-
-  // Send dest funds to source party (refundSource = source party's address)
-  var dstWallet = new ethers.Wallet(privateKeyHex, dstProvider);
-  var txDst = await dstWallet.sendTransaction({ to: refundSource, value: destAmount });
-
-  // 5. Send fee to owner
-  var feeResult = {};
-  if (fee.gt(0)) {
-    var txFee = await srcWallet.sendTransaction({ to: feeRecipient, value: fee });
-    feeResult.feeHash = txFee.hash;
-  }
-
-  // 6. Sweep any excess on source chain
-  var remainSrc = await srcProvider.getBalance(depositSource);
-  if (remainSrc.gt(0)) {
-    var gp3 = await srcProvider.getGasPrice();
-    var gc3 = gp3.mul(21000);
-    var sweep = remainSrc.sub(gc3);
-    if (sweep.gt(0)) {
-      await srcWallet.sendTransaction({ to: refundSource, value: sweep, gasLimit: 21000 });
-    }
-  }
-
-  // 7. Mark executed on contract
-  var baseW = new ethers.Wallet(privateKeyHex, baseProvider);
-  var mAbi = ["function markExecuted(uint256)"];
-  var mContract = new ethers.Contract(params.contractAddress, mAbi, baseW);
-  await mContract.markExecuted(params.swapId);
-
-  // 8. Sign receipt
-  var receipt = JSON.stringify({
-    swapId: params.swapId,
-    sourceTx: txSrc.hash,
-    destTx: txDst.hash,
-    sourceAmount: sourceAmount.toString(),
-    destAmount: destAmount.toString(),
-    fee: fee.toString(),
-    timestamp: Date.now(),
-  });
-  var receiptSig = await baseW.signMessage(receipt);
-
-  return {
-    status: "executed",
-    sourceTxHash: txSrc.hash,
-    destTxHash: txDst.hash,
-    receipt: receipt,
-    receiptSignature: receiptSig,
-    ...feeResult,
-  };
+function templateKeyForChains(sourceChain, destChain) {
+  const key = CHAIN_FAMILY[sourceChain] + ',' + CHAIN_FAMILY[destChain];
+  return TEMPLATE_BY_FAMILIES[key];
 }
-`;
+
+function getActionCode(actionType, salt, sourceChain, destChain) {
+  const templates = window.ActionTemplates || {};
+  const gen = templates[actionType];
+  if (!gen) throw new Error('No action template registered for "' + actionType + '"');
+  return gen(salt, sourceChain, destChain);
+}
+
+// Pick a side's deposit address from a derive-mode result. The engine returns
+// evmAddress plus "<label>AddressSource" / "<label>AddressDest" keys.
+function pickDeposit(addresses, side) {
+  const suffix = side === 'source' ? 'AddressSource' : 'AddressDest';
+  for (const k of Object.keys(addresses)) if (k.endsWith(suffix)) return addresses[k];
+  // Fail loud rather than silently routing funds to the EVM action identity.
+  throw new Error('Derive result missing ' + suffix + ' deposit address: ' + JSON.stringify(addresses));
 }
 
 // ---------------------------------------------------------------------------
@@ -371,11 +235,25 @@ async function createSwap() {
     const salt = await generateSalt(nextId.toString(), CONTRACT_ADDRESS, timestamp);
     log(output, 'Salt: ' + salt.slice(0, 16) + '...', 'dim');
 
+    // Derive the template from the actual chains so create and execute/verify
+    // always resolve the SAME (type, source, dest) -> same CID. The #action-type
+    // dropdown is advisory; the selected chains are authoritative. If they
+    // disagree, a swap could be created whose CID can never be reproduced at
+    // execute time, locking the funds.
+    const resolvedType = templateKeyForChains(sourceChain, destChain);
+    if (!resolvedType) {
+      log(output, 'Unsupported chain pair: ' + sourceChain + ' <> ' + destChain, 'error');
+      return;
+    }
+    if (resolvedType !== actionType) {
+      log(output, 'Swap type "' + actionType + '" does not match the selected chains; using "' + resolvedType + '".', 'warn');
+    }
+
     let actionCode;
-    if (actionType === 'evm-evm') {
-      actionCode = getEvmEvmActionCode(salt);
-    } else {
-      log(output, actionType + ' not yet implemented. EVM<>EVM only for now.', 'warn');
+    try {
+      actionCode = getActionCode(resolvedType, salt, sourceChain, destChain);
+    } catch (e) {
+      log(output, e.message, 'error');
       return;
     }
 
@@ -393,8 +271,11 @@ async function createSwap() {
 
     log(output, 'Deriving deposit addresses via Lit...', 'dim');
     const addresses = await deriveAddresses(litApiKey, actionCode);
-    const depositAddr = addresses.evmAddress;
-    log(output, 'Deposit address: ' + depositAddr, 'success');
+    const depositSourceAddr = pickDeposit(addresses, 'source');
+    const depositDestAddr = pickDeposit(addresses, 'dest');
+    const litActionEvmAddr = addresses.evmAddress;
+    log(output, 'Source deposit (' + sourceChain + '): ' + depositSourceAddr, 'success');
+    log(output, 'Dest deposit (' + destChain + '): ' + depositDestAddr, 'success');
 
     // 5. Create swap on contract (user's wallet signs)
     log(output, 'Creating swap on Base contract...', 'dim');
@@ -425,13 +306,13 @@ async function createSwap() {
       destAmount,
       refundSource,
       refundDest,
-      depositAddr,
-      depositAddr, // same EVM address on both chains
+      depositSourceAddr,
+      depositDestAddr,
       1, // confirmation blocks
       expirationTs,
       feeBps,
       cid,
-      depositAddr, // litActionEvmAddress
+      litActionEvmAddr, // EVM identity that calls markExecuted/markRefunded on Base
       tokenSource,
       tokenDest,
     );
@@ -458,15 +339,15 @@ async function createSwap() {
     log(output, '');
     log(output, '=== Swap Created ===', 'success');
     log(output, 'Swap ID: ' + swapId);
-    log(output, 'Type: ' + actionType);
+    log(output, 'Type: ' + resolvedType);
     log(output, sourceChain + ' -> ' + destChain);
     log(output, 'Expires: ' + new Date(expirationTs * 1000).toISOString());
     log(output, 'Salt: ' + salt, 'dim');
     log(output, 'CID: ' + cid, 'dim');
     log(output, '');
     log(output, 'Deposit addresses (fund both sides):');
-    log(output, '  Source (' + sourceChain + '): ' + depositAddr);
-    log(output, '  Dest (' + destChain + '): ' + depositAddr);
+    log(output, '  Source (' + sourceChain + '): ' + depositSourceAddr);
+    log(output, '  Dest (' + destChain + '): ' + depositDestAddr);
     if (tokenSource !== ethers.ZeroAddress) {
       log(output, '  Source token: ' + tokenSource, 'dim');
     }
@@ -586,6 +467,7 @@ async function executeSwap() {
     const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
 
     const [state, , , , , , , cid] = await contract.getSwapState(swapId);
+    const [sourceChain, destChain] = await contract.getSwapAddresses(swapId);
 
     if (Number(state) !== 0) {
       log(output, 'Swap is in state ' + STATE_NAMES[Number(state)] + ', not Created.', 'error');
@@ -605,7 +487,18 @@ async function executeSwap() {
       return;
     }
 
-    const actionCode = getEvmEvmActionCode(salt);
+    const actionType = templateKeyForChains(sourceChain, destChain);
+    if (!actionType) {
+      log(output, 'Unsupported chain pair: ' + sourceChain + ' <> ' + destChain, 'error');
+      return;
+    }
+    let actionCode;
+    try {
+      actionCode = getActionCode(actionType, salt, sourceChain, destChain);
+    } catch (e) {
+      log(output, e.message, 'error');
+      return;
+    }
 
     // Verify CID matches
     log(output, 'Verifying CID...', 'dim');
@@ -803,7 +696,6 @@ async function verifyCid() {
 
   const swapId = document.getElementById('verify-swap-id').value;
   const salt = document.getElementById('verify-salt').value;
-  const actionType = document.getElementById('verify-action-type').value;
 
   if (swapId === '' || !salt) {
     log(output, 'Enter swap ID and salt.', 'error');
@@ -816,15 +708,23 @@ async function verifyCid() {
     const provider = new ethers.JsonRpcProvider(BASE_RPC);
     const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
     const [, , , , , , , storedCid] = await contract.getSwapState(swapId);
+    const [sourceChain, destChain] = await contract.getSwapAddresses(swapId);
     log(output, 'Stored CID: ' + storedCid);
 
-    // 2. Reconstruct action code from template + salt
+    // 2. Reconstruct action code from template + salt. Derive the template from
+    // the swap's actual chains (same as execute) so a valid swap never shows a
+    // false CID mismatch from a mis-picked dropdown.
     log(output, 'Reconstructing action code from template...', 'dim');
+    const vType = templateKeyForChains(sourceChain, destChain);
+    if (!vType) {
+      log(output, 'Unsupported chain pair: ' + sourceChain + ' <> ' + destChain, 'error');
+      return;
+    }
     let actionCode;
-    if (actionType === 'evm-evm') {
-      actionCode = getEvmEvmActionCode(salt);
-    } else {
-      log(output, actionType + ' verification not yet supported.', 'warn');
+    try {
+      actionCode = getActionCode(vType, salt, sourceChain, destChain);
+    } catch (e) {
+      log(output, e.message, 'error');
       return;
     }
 

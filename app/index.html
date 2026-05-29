@@ -372,6 +372,10 @@
             <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
             <option value="optimism-sepolia">Optimism Sepolia</option>
             <option value="bitcoin-signet">Bitcoin Signet</option>
+            <option value="litecoin-testnet">Litecoin Testnet</option>
+            <option value="dogecoin-testnet">Dogecoin Testnet</option>
+            <option value="zcash-testnet">Zcash Testnet (transparent)</option>
+            <option value="solana-devnet">Solana Devnet</option>
           </select>
         </div>
         <div class="form-group">
@@ -382,6 +386,10 @@
             <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
             <option value="optimism-sepolia">Optimism Sepolia</option>
             <option value="bitcoin-signet">Bitcoin Signet</option>
+            <option value="litecoin-testnet">Litecoin Testnet</option>
+            <option value="dogecoin-testnet">Dogecoin Testnet</option>
+            <option value="zcash-testnet">Zcash Testnet (transparent)</option>
+            <option value="solana-devnet">Solana Devnet</option>
           </select>
         </div>
       </div>
@@ -435,6 +443,13 @@
             <option value="evm-btc">EVM &lt;&gt; Bitcoin</option>
             <option value="evm-zec">EVM &lt;&gt; Zcash</option>
             <option value="btc-zec">Bitcoin &lt;&gt; Zcash</option>
+            <option value="btc-ltc">Bitcoin &lt;&gt; Litecoin</option>
+            <option value="btc-doge">Bitcoin &lt;&gt; Dogecoin</option>
+            <option value="evm-sol">EVM &lt;&gt; Solana</option>
+            <option value="btc-sol">Bitcoin &lt;&gt; Solana</option>
+            <option value="zec-sol">Zcash &lt;&gt; Solana</option>
+            <option value="zec-ltc">Zcash &lt;&gt; Litecoin</option>
+            <option value="zec-doge">Zcash &lt;&gt; Dogecoin</option>
           </select>
         </div>
         <div class="form-group">
@@ -547,18 +562,42 @@
       <label>Salt (from swap creation)</label>
       <input type="text" id="verify-salt" placeholder="sha256 hex string">
     </div>
-    <div class="form-group">
-      <label>Action Type</label>
-      <select id="verify-action-type">
-        <option value="evm-evm">EVM &lt;&gt; EVM</option>
-        <option value="evm-btc">EVM &lt;&gt; Bitcoin</option>
-      </select>
-    </div>
+    <p class="hint">Swap type is detected automatically from the swap's chains.</p>
     <button class="btn btn-primary" onclick="verifyCid()">Verify CID</button>
     <div id="verify-output" class="status-box" style="display:none"></div>
   </div>
 </main>
 
+<!-- Expose the audited action-template generators (ESM) on window for the
+     classic swap-engine.js script. Loading these modules does NOT fetch
+     jsDelivr — the jsDelivr imports live only inside the generated action
+     strings, which run in the Lit sandbox. -->
+<script type="module">
+  import { getEvmEvmActionCode } from './actions/evm-evm-action.js';
+  import { getEvmBtcActionCode } from './actions/evm-btc-action.js';
+  import { getEvmZecActionCode } from './actions/evm-zec-action.js';
+  import { getBtcZecActionCode } from './actions/btc-zec-action.js';
+  import { getBtcLtcActionCode } from './actions/btc-ltc-action.js';
+  import { getBtcDogeActionCode } from './actions/btc-doge-action.js';
+  import { getEvmSolActionCode } from './actions/evm-sol-action.js';
+  import { getBtcSolActionCode } from './actions/btc-sol-action.js';
+  import { getZecSolActionCode } from './actions/zec-sol-action.js';
+  import { getZecLtcActionCode } from './actions/zec-ltc-action.js';
+  import { getZecDogeActionCode } from './actions/zec-doge-action.js';
+  window.ActionTemplates = {
+    'evm-evm': getEvmEvmActionCode,
+    'evm-btc': getEvmBtcActionCode,
+    'evm-zec': getEvmZecActionCode,
+    'btc-zec': getBtcZecActionCode,
+    'btc-ltc': getBtcLtcActionCode,
+    'btc-doge': getBtcDogeActionCode,
+    'evm-sol': getEvmSolActionCode,
+    'btc-sol': getBtcSolActionCode,
+    'zec-sol': getZecSolActionCode,
+    'zec-ltc': getZecLtcActionCode,
+    'zec-doge': getZecDogeActionCode,
+  };
+</script>
 <script src="swap-engine.js"></script>
 </body>
 </html>
