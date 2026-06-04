@@ -3,26 +3,44 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Action Swaps</title>
+  <title>Settled — Cross-Chain Settlement</title>
+  <!-- Set theme before paint to avoid a flash -->
+  <script>(function(){try{var t=localStorage.getItem('theme')||(window.matchMedia&&matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- Fraunces (display) + JetBrains Mono (technical truth) -->
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- General Sans (body/UI) — Fontshare. CSP note: self-host if font origins are locked down; do NOT fall back to Inter. -->
+  <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
   <style>
+    /* ===== "Settled" design system — see DESIGN.md =====
+       Original CSS var names are preserved (--bg, --text, --accent, ...) so
+       JS-injected markup keeps working; they're remapped to the new palette. */
     :root {
-      --bg: #0a0a0a;
-      --surface: #141414;
-      --border: #2a2a2a;
-      --text: #e0e0e0;
-      --text-dim: #999;
-      --accent: #4f9eff;
-      --accent-hover: #6db3ff;
-      --success: #34d399;
-      --warning: #fbbf24;
-      --error: #f87171;
-      --radius: 8px;
-      --mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
-      --font: 'JetBrains Mono', monospace;
+      --canvas:#FAF8F4; --bg:#FAF8F4;
+      --surface:#FFFFFF; --surface-2:#F4F0E9;
+      --border:#ECE7DF;
+      --text:#1A1714; --ink:#1A1714; --text-dim:#7A726A; --muted:#7A726A;
+      --accent:#E0922F; --accent-hover:#B8731F; --accent-deep:#B8731F;
+      --accent-soft:#FBEFD9; --on-accent:#231A08;
+      --success:#2E9E6B; --warning:#B8731F; --error:#D2452F; --info:#3A7BD5;
+      --radius:12px; --radius-sm:8px; --radius-full:999px;
+      --display:'Fraunces',Georgia,serif;
+      --font:'General Sans',-apple-system,BlinkMacSystemFont,sans-serif;
+      --mono:'JetBrains Mono','SF Mono','Fira Code',monospace;
+      --shadow:0 1px 2px rgba(26,23,20,.04), 0 8px 24px rgba(26,23,20,.06);
+      --shadow-lg:0 2px 4px rgba(26,23,20,.05), 0 24px 60px rgba(26,23,20,.10);
+    }
+    [data-theme="dark"] {
+      --canvas:#14110D; --bg:#14110D;
+      --surface:#1E1A15; --surface-2:#262019; --border:#322B22;
+      --text:#F2EDE4; --ink:#F2EDE4; --text-dim:#A99F92; --muted:#A99F92;
+      --accent:#F0A845; --accent-hover:#E0922F; --accent-deep:#E0922F;
+      --accent-soft:#2A2114; --on-accent:#231A08;
+      --success:#3FBF84; --warning:#F0A845; --error:#E8654F;
+      --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.4);
+      --shadow-lg:0 2px 4px rgba(0,0,0,.4), 0 24px 60px rgba(0,0,0,.5);
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -31,53 +49,91 @@
       font-family: var(--font);
       background: var(--bg);
       color: var(--text);
-      line-height: 1.5;
+      line-height: 1.55;
       min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+      transition: background .4s ease, color .4s ease;
     }
 
     header {
+      position: sticky; top: 0; z-index: 20;
       border-bottom: 1px solid var(--border);
-      padding: 16px 24px;
+      padding: 14px 24px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: linear-gradient(180deg, rgba(79,158,255,0.03) 0%, transparent 100%);
+      background: color-mix(in srgb, var(--canvas) 88%, transparent);
+      backdrop-filter: blur(12px);
     }
 
     header h1 {
+      font-family: var(--display);
       font-size: 22px;
-      font-weight: 700;
-      letter-spacing: -0.04em;
+      font-weight: 600;
+      letter-spacing: -0.02em;
       display: flex;
       align-items: center;
       gap: 10px;
     }
 
-    header h1 svg {
-      width: 22px;
-      height: 22px;
-      opacity: 0.6;
+    header h1 .dot {
+      width: 14px; height: 14px;
+      border-radius: var(--radius-full);
+      background: var(--accent);
+      box-shadow: 0 0 0 4px var(--accent-soft);
+      flex-shrink: 0;
     }
+
+    .bar-right { display: flex; align-items: center; gap: 10px; }
+
+    .theme-toggle {
+      font: 500 13px var(--font);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      padding: 9px 14px;
+      border-radius: var(--radius-full);
+      cursor: pointer;
+      min-height: 40px;
+      transition: border-color .2s;
+    }
+    .theme-toggle:hover { border-color: var(--accent); }
 
     #wallet-btn {
-      background: var(--accent);
-      color: #fff;
+      background: var(--ink);
+      color: var(--canvas);
       border: none;
-      padding: 10px 20px;
-      border-radius: var(--radius);
-      font-size: 14px;
+      padding: 10px 18px;
+      border-radius: var(--radius-full);
+      font: 600 14px var(--font);
       cursor: pointer;
-      font-weight: 500;
-      min-height: 44px;
+      min-height: 40px;
+      transition: transform .15s;
     }
-
-    #wallet-btn:hover { background: var(--accent-hover); }
-    #wallet-btn.connected { background: var(--success); }
+    #wallet-btn:hover { transform: translateY(-1px); }
+    #wallet-btn.connected { background: var(--success); color: #fff; }
 
     main {
       max-width: 640px;
       margin: 32px auto;
       padding: 0 24px;
+    }
+
+    .hero { text-align: center; margin-bottom: 28px; }
+    .hero h2 {
+      font-family: var(--display);
+      font-weight: 600;
+      font-size: clamp(28px, 4.5vw, 38px);
+      line-height: 1.08;
+      letter-spacing: -0.03em;
+      margin-bottom: 12px;
+    }
+    .hero h2 em { font-style: italic; color: var(--accent-deep); }
+    .hero p {
+      font-size: 15px;
+      color: var(--text-dim);
+      max-width: 52ch;
+      margin: 0 auto;
     }
 
     .tabs {
@@ -97,7 +153,7 @@
       background: none;
       border: none;
       color: var(--text-dim);
-      font-size: 14px;
+      font: 500 14px var(--font);
       cursor: pointer;
       border-bottom: 2px solid transparent;
       margin-bottom: -1px;
@@ -106,9 +162,7 @@
       white-space: nowrap;
     }
 
-    .tab:hover {
-      color: var(--text);
-    }
+    .tab:hover { color: var(--text); }
 
     .tab:focus-visible {
       outline: 2px solid var(--accent);
@@ -119,6 +173,7 @@
     .tab.active {
       color: var(--text);
       border-bottom-color: var(--accent);
+      font-weight: 600;
     }
 
     .panel { display: none; opacity: 0; }
@@ -129,9 +184,7 @@
       to { opacity: 1; transform: translateY(0); }
     }
 
-    .form-group {
-      margin-bottom: 16px;
-    }
+    .form-group { margin-bottom: 16px; }
 
     label {
       display: block;
@@ -143,10 +196,10 @@
 
     input, select {
       width: 100%;
-      padding: 10px 12px;
+      padding: 11px 12px;
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--radius);
+      border-radius: var(--radius-sm);
       color: var(--text);
       font-size: 14px;
       font-family: var(--mono);
@@ -156,7 +209,7 @@
     input:focus, select:focus {
       outline: none;
       border-color: var(--accent);
-      box-shadow: 0 0 0 2px rgba(79, 158, 255, 0.2);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
     }
 
     input:focus-visible, select:focus-visible {
@@ -178,15 +231,14 @@
 
     .btn {
       width: 100%;
-      padding: 14px;
+      padding: 15px;
       border: none;
-      border-radius: var(--radius);
-      font-size: 14px;
-      font-weight: 600;
+      border-radius: var(--radius-sm);
+      font: 600 15px var(--font);
       cursor: pointer;
       margin-top: 12px;
-      min-height: 48px;
-      transition: background 0.15s, opacity 0.15s;
+      min-height: 52px;
+      transition: transform 0.15s, box-shadow 0.2s, opacity 0.15s;
     }
 
     .btn:focus-visible {
@@ -196,12 +248,13 @@
 
     .btn-primary {
       background: var(--accent);
-      color: #fff;
+      color: var(--on-accent);
+      box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 38%, transparent);
     }
 
-    .btn-primary:hover { background: var(--accent-hover); }
-    .btn-primary:active { transform: scale(0.98); opacity: 0.9; }
-    .btn-primary:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 48%, transparent); }
+    .btn-primary:active { transform: scale(0.99); opacity: 0.95; }
+    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
 
     .form-section {
       margin-bottom: 24px;
@@ -226,7 +279,7 @@
     .status-box {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--radius);
+      border-radius: var(--radius-sm);
       padding: 16px;
       margin-top: 16px;
       font-family: var(--mono);
@@ -255,7 +308,7 @@
     .swap-card {
       background: var(--surface);
       border: 1px solid var(--border);
-      border-radius: var(--radius);
+      border-radius: var(--radius-sm);
       padding: 16px;
       margin-bottom: 12px;
     }
@@ -275,17 +328,18 @@
 
     .badge {
       display: inline-block;
-      padding: 2px 8px;
-      border-radius: 12px;
+      padding: 3px 9px;
+      border-radius: var(--radius-full);
       font-size: 11px;
       font-weight: 600;
       text-transform: uppercase;
+      letter-spacing: 0.03em;
     }
 
-    .badge-created { background: #1e3a5f; color: var(--accent); }
-    .badge-executed { background: #064e3b; color: var(--success); }
-    .badge-refunded { background: #78350f; color: var(--warning); }
-    .badge-expired { background: #450a0a; color: var(--error); }
+    .badge-created  { background: var(--accent-soft); color: var(--accent-deep); }
+    .badge-executed { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+    .badge-refunded { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+    .badge-expired  { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
 
     .section-title {
       font-size: 13px;
@@ -297,7 +351,7 @@
 
     .empty-state {
       text-align: center;
-      padding: 32px 16px 24px;
+      padding: 28px 16px 22px;
       color: var(--text-dim);
       font-size: 13px;
       line-height: 1.6;
@@ -307,33 +361,44 @@
       width: 32px;
       height: 32px;
       margin-bottom: 12px;
-      opacity: 0.4;
+      opacity: 0.55;
       stroke: var(--accent);
     }
 
-    .empty-state p {
-      max-width: 340px;
-      margin: 0 auto;
-    }
+    .empty-state p { max-width: 340px; margin: 0 auto; }
+
+    .hint { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
 
     .deposit-info {
-      background: #0d1f3c;
-      border: 1px solid #1e3a5f;
-      border-radius: var(--radius);
+      background: var(--accent-soft);
+      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      border-radius: var(--radius-sm);
       padding: 12px;
       margin-top: 12px;
     }
 
-    .deposit-info p {
-      font-size: 13px;
-      margin-bottom: 6px;
-    }
+    .deposit-info p { font-size: 13px; margin-bottom: 6px; }
 
     .deposit-info .addr {
       font-family: var(--mono);
       font-size: 12px;
-      color: var(--accent);
+      color: var(--accent-deep);
       word-break: break-all;
+    }
+
+    /* Trust panel — the hero feature, stated plainly */
+    .trust {
+      display: flex; gap: 12px; align-items: flex-start;
+      margin-top: 20px; padding: 14px 16px;
+      border: 1px dashed var(--border);
+      border-radius: var(--radius-sm);
+    }
+    .trust .shield { color: var(--success); flex-shrink: 0; margin-top: 2px; }
+    .trust .t-title { font-weight: 600; font-size: 14px; }
+    .trust .t-sub { font-size: 13px; color: var(--text-dim); }
+
+    @media (prefers-reduced-motion: reduce) {
+      * { transition: none !important; animation: none !important; }
     }
   </style>
 </head>
@@ -341,16 +406,21 @@
 
 <header>
   <h1>
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <polyline points="17 1 21 5 17 9"></polyline><path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-      <polyline points="7 23 3 19 7 15"></polyline><path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-    </svg>
-    Action Swaps
+    <span class="dot" aria-hidden="true"></span>
+    Settled
   </h1>
-  <button id="wallet-btn" onclick="connectWallet()">Connect Wallet</button>
+  <div class="bar-right">
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle color theme">◐ <span id="theme-label">Dark</span></button>
+    <button id="wallet-btn" onclick="connectWallet()">Connect Wallet</button>
+  </div>
 </header>
 
 <main>
+  <div class="hero">
+    <h2>Move value across chains. <em>No one holds it but math.</em></h2>
+    <p>No bridge, no wrapped tokens. Each swap's signing key is generated inside a hardware-secured TEE, so it can't be seized, frozen, or rugged.</p>
+  </div>
+
   <div class="tabs">
     <button class="tab active" onclick="showTab('create')">Create</button>
     <button class="tab" onclick="showTab('status')">Status</button>
@@ -475,6 +545,16 @@
       Connect wallet to create swap
     </button>
 
+    <div class="trust">
+      <span class="shield" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      </span>
+      <div>
+        <div class="t-title">No one holds your funds</div>
+        <div class="t-sub">Each swap mints a unique key inside a Trusted Execution Environment. No one can reach it, not even Lit, and a complete root-of-trust system attests to the exact code running. If a leg fails mid-swap, re-running picks up exactly where it left off.</div>
+      </div>
+    </div>
+
     <div id="create-output" class="status-box" style="display:none"></div>
   </div>
 
@@ -597,6 +677,22 @@
     'zec-ltc': getZecLtcActionCode,
     'zec-doge': getZecDogeActionCode,
   };
+</script>
+<!-- Theme toggle (independent of swap-engine.js) -->
+<script>
+  function toggleTheme() {
+    var r = document.documentElement;
+    var next = r.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    r.setAttribute('data-theme', next);
+    var lbl = document.getElementById('theme-label');
+    if (lbl) lbl.textContent = next === 'light' ? 'Dark' : 'Light';
+    try { localStorage.setItem('theme', next); } catch (e) {}
+  }
+  // Sync the toggle label with the theme set before paint
+  (function () {
+    var lbl = document.getElementById('theme-label');
+    if (lbl) lbl.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? 'Dark' : 'Light';
+  })();
 </script>
 <script src="swap-engine.js"></script>
 </body>
