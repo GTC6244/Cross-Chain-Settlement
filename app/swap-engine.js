@@ -1,5 +1,5 @@
 /**
- * Action Swaps — Browser Engine
+ * Settled — Browser Engine
  *
  * Static web app. No backend. Talks directly to:
  * - Base RPC (via ethers.js from CDN)

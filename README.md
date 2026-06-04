@@ -1,6 +1,6 @@
 # Cross-Chain Settlement
 
-Trustless cross-chain swaps using [Lit Protocol](https://developer.litprotocol.com/) Lit Actions as a decentralized custodian. No bridges, no wrapped tokens, no HTLC complexity.
+Trustless cross-chain swaps using [Lit Protocol](https://developer.litprotocol.com/) Lit Actions as the custodian, with each swap's signing key generated and used only inside a Trusted Execution Environment (TEE). No bridges, no wrapped tokens, no HTLC complexity.
 
 ## How it works
 
@@ -11,7 +11,7 @@ Trustless cross-chain swaps using [Lit Protocol](https://developer.litprotocol.c
 5. Each leg is logged to the contract as it completes. If execution fails mid-swap, re-running the action picks up where it left off.
 6. Once both legs are settled, the action signs a cryptographic receipt and marks the swap executed
 
-The Lit Action's private key exists only inside the Lit network's threshold cryptography system. No single party ever holds it.
+The Lit Action's private key is generated and used only inside a Trusted Execution Environment (TEE), attested by a complete root-of-trust system. No one, not even Lit, can extract it.
 
 ## Chain pairs
 
@@ -232,12 +232,12 @@ Update `CONTRACT_ADDRESS` in `app/swap-engine.js` after deployment.
 
 ## Security model
 
-This is NOT an atomic swap protocol. It is a decentralized custodian model where immutable IPFS code is the trust guarantee.
+This is NOT an atomic swap protocol. It is a TEE-custodied model where immutable IPFS code, pinned by CID and attested by a root of trust, is the trust guarantee.
 
 - Trust assumptions: Lit network liveness + immutable IPFS code
 - If Lit goes down mid-swap, funds sit in the action's wallet until the network recovers
 - One-sided settlement failure is handled by per-leg logging. Re-execute the action to complete the remaining leg. The contract prevents double-settlement.
-- The action's private key is derived from the IPFS CID via Lit's threshold cryptography. No single node holds the full key.
+- The action's private key is uniquely tied to the IPFS CID and exists only inside the TEE. No node ever holds it in the clear.
 
 ## License
 
