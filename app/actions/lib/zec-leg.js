@@ -10,14 +10,18 @@
  * own deposit address, so each input's scriptCode is our own P2PKH script —
  * no previous-tx fetch needed.
  *
- * !!! HIGHEST-RISK PATH IN THE REPO — UNVERIFIED !!!
- * Must be checked on Zcash testnet before trusting. In particular:
- *   - branchId/txVersion must match the active network upgrade (post-NU5
- *     testnet may require v5/ZIP-244 and reject this v4/ZIP-243 tx).
- *   - personalization tag bytes and field ordering follow ZIP-243; verify
- *     against a known-good signed transaction.
+ * VERIFICATION STATUS (2026-06-04, zcashd 6.20.0 regtest):
+ *   - The ZIP-243 v4 sighash + serialization is CORRECT: shim-signed txs are
+ *     accepted + mined by zcashd consensus on both a Canopy chain (branch
+ *     e9ff75a6) and a NU6 chain (branch c8e71055). v4 is NOT obsolete post-NU5.
+ *   - branchId MUST equal the deployment's active network upgrade. A mismatch
+ *     fails zcashd's mandatory-script-verify (the branch id feeds the sighash).
+ *     See networks.js for the branch-id table; a live-fetch is the robust fix.
+ *   - Fees use ZIP-317 (selectCoinsZip317/drainCoinsZip317), not sat/byte —
+ *     zcashd's mempool rejects sub-conventional fees ("unpaid action limit").
+ *   See .context/zec-verify/FINDINGS.md for the full reproduction.
  *
- * Assumes selectCoins/drainCoins (UTXO_MATH_SRC) and SIZES_LEGACY are already
+ * Assumes selectCoinsZip317/drainCoinsZip317 (UTXO_MATH_SRC) are already
  * defined in the assembled action.
  */
 
@@ -62,8 +66,10 @@ function taddrToHash160(addr) {
   return payload.slice(payload.length - 20);
 }
 
-// ZIP-243 transparent sighash for input #index.
-function zip243Sighash(cfg, inputs, outputs, index, scriptCode, amount) {
+// ZIP-243 transparent sighash for input #index. branchId is passed in (resolved
+// live from the node when available) rather than read from cfg, so it always
+// matches the chain's active consensus branch.
+function zip243Sighash(cfg, branchId, inputs, outputs, index, scriptCode, amount) {
   var header = u32le((cfg.txVersion | 0x80000000) >>> 0); // overwinter flag + v4
   var prevoutsData = cat.apply(null, inputs.map(function (i) { return cat(rev(hex.decode(i.txid)), u32le(i.vout)); }));
   var hashPrevouts = blake2bPersonal(prevoutsData, tagBytes("ZcashPrevoutHash"));
@@ -91,7 +97,7 @@ function zip243Sighash(cfg, inputs, outputs, index, scriptCode, amount) {
     u64le(amount),
     u32le(0xffffffff)
   );
-  return blake2bPersonal(preimage, sigHashPersonal(cfg.branchId));
+  return blake2bPersonal(preimage, sigHashPersonal(branchId));
 }
 
 function serializeV4(cfg, inputs, outputs, scriptSigs) {
@@ -111,7 +117,46 @@ function serializeV4(cfg, inputs, outputs, scriptSigs) {
   return cat.apply(null, parts);
 }
 
+// JSON-RPC call to a self-hosted zcashd node (cfg.api.style === "zcashd").
+// cfg.api.rpc is the node URL; cfg.api.rpcAuth is an optional Authorization
+// header value (e.g. "Basic " + base64("user:pass")).
+async function zecRpc(cfg, method, params) {
+  var headers = { "Content-Type": "application/json" };
+  if (cfg.api.rpcAuth) headers["Authorization"] = cfg.api.rpcAuth;
+  var resp = await fetch(cfg.api.rpc, { method: "POST", headers: headers,
+    body: JSON.stringify({ jsonrpc: "1.0", id: "zec", method: method, params: params || [] }) });
+  // zcashd returns a JSON body (with .error) even on HTTP 500 for RPC errors, so
+  // parse first; a non-JSON body (proxy 502 HTML, auth text) is the failure to surface.
+  var text = await resp.text();
+  var data;
+  try { data = JSON.parse(text); }
+  catch (e) { throw new Error("zec rpc " + method + " non-JSON (http " + resp.status + "): " + text.slice(0, 200)); }
+  if (data.error) throw new Error("zec rpc " + method + ": " + JSON.stringify(data.error));
+  return data.result;
+}
+
+// Active consensus branch id for the sighash. From a zcashd node it's read live
+// (consensus.nextblock) so it always matches the active upgrade; otherwise the
+// configured cfg.branchId is used (must be kept current — see networks.js).
+async function zecBranchId(cfg) {
+  if (cfg.api.style === "zcashd") {
+    var info = await zecRpc(cfg, "getblockchaininfo", []);
+    var nb = info && info.consensus && info.consensus.nextblock;
+    var id = parseInt(nb, 16);
+    // Never fall through to a NaN->0 branch id (would silently sign a tx the
+    // network rejects with no clear cause); fail loudly instead.
+    if (!Number.isFinite(id)) throw new Error("zec: bad branch id from node: " + nb);
+    return id >>> 0;
+  }
+  return cfg.branchId;
+}
+
 async function zecFetchUtxos(cfg, address) {
+  if (cfg.api.style === "zcashd") {
+    var u = await zecRpc(cfg, "getaddressutxos", [{ addresses: [address] }]);
+    return u.filter(function (x) { return x.height > 0; })
+            .map(function (x) { return { txid: x.txid, vout: x.outputIndex, amount: BigInt(x.satoshis) }; });
+  }
   var resp = await fetch(cfg.api.base + "/addr/" + address + "/utxo");
   if (resp.ok) {
     var arr = await resp.json();
@@ -126,6 +171,9 @@ async function zecFetchUtxos(cfg, address) {
 }
 
 async function zecBroadcast(cfg, rawHex) {
+  if (cfg.api.style === "zcashd") {
+    return zecRpc(cfg, "sendrawtransaction", [rawHex]);
+  }
   var resp = await fetch(cfg.api.base + "/tx/send", { method: "POST",
     headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rawtx: rawHex }) });
   if (!resp.ok) throw new Error("zec broadcast failed: " + (await resp.text()));
@@ -140,11 +188,11 @@ function makeZecLeg(ctx, chainId_, role) {
   var myScript = p2pkhScript(myH160);
   var address = ZEC_B58.encode(cat(new Uint8Array(cfg.pubKeyHash2), myH160));
 
-  function buildSigned(selected, outs) {
+  function buildSigned(selected, outs, branchId) {
     var inputs = selected.map(function (u) { return { txid: u.txid, vout: u.vout }; });
     var scriptSigs = [];
     for (var i = 0; i < inputs.length; i++) {
-      var sh = zip243Sighash(cfg, inputs, outs, i, myScript, selected[i].amount);
+      var sh = zip243Sighash(cfg, branchId, inputs, outs, i, myScript, selected[i].amount);
       var sig = secp256k1.sign(sh, ctx.keyBytes).toDERRawBytes();
       var sigWithType = cat(sig, new Uint8Array([0x01])); // SIGHASH_ALL
       scriptSigs.push(cat(varint(sigWithType.length), sigWithType, varint(pub.length), pub));
@@ -163,19 +211,21 @@ function makeZecLeg(ctx, chainId_, role) {
       return t;
     },
     settle: async function (o) {
+      var branchId = await zecBranchId(cfg);
       var utxos = await zecFetchUtxos(cfg, o.deposit);
-      var sel = selectCoins(utxos, o.amount, cfg.defaultFeeRate, SIZES_LEGACY, cfg.minFee);
+      var sel = selectCoinsZip317(utxos, o.amount);
       var outs = [{ value: o.amount, script: p2pkhScript(taddrToHash160(o.to)) }];
       if (sel.change > BigInt(cfg.dust)) outs.push({ value: sel.change, script: myScript });
-      return zecBroadcast(cfg, buildSigned(sel.selected, outs));
+      return zecBroadcast(cfg, buildSigned(sel.selected, outs, branchId));
     },
     drain: async function (o) {
+      var branchId = await zecBranchId(cfg);
       var utxos = await zecFetchUtxos(cfg, o.deposit);
       if (!utxos.length) return null;
-      var d = drainCoins(utxos, cfg.defaultFeeRate, SIZES_LEGACY, cfg.minFee);
+      var d = drainCoinsZip317(utxos);
       if (d.send <= BigInt(cfg.dust)) return null;
       var outs = [{ value: d.send, script: p2pkhScript(taddrToHash160(o.to)) }];
-      return zecBroadcast(cfg, buildSigned(d.selected, outs));
+      return zecBroadcast(cfg, buildSigned(d.selected, outs, branchId));
     },
   };
 }

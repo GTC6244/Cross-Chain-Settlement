@@ -72,21 +72,42 @@ export const CHAINS = {
   // ---- Zcash transparent (secp256k1 t-addr, ZIP-243 sighash shim) -------
   // NOT signable by @scure/btc-signer — uses the custom zcash leg.
   // pubKeyHash2/scriptHash2 are the 2-byte t-address version prefixes.
-  // branchId/versionGroupId must match the active testnet network upgrade.
+  //
+  // The ZIP-243 v4 sighash + serialization is VERIFIED correct against zcashd
+  // 6.20.0 regtest (see .context/zec-verify/FINDINGS.md). v4 is still accepted
+  // post-NU5/NU6. TWO things remain deployment-critical:
+  //   1. branchId MUST equal the chain's ACTIVE consensus branch id, or every
+  //      tx fails mandatory-script-verify (the branch id feeds the sighash).
+  //      Branch ids:  Sapling 76b809bb | Blossom 2bb40e60 | Heartwood f5b9230b
+  //                   Canopy  e9ff75a6 | NU5 c2d6d0b4 | NU6 c8e71055
+  //      Default below is NU6 (mainnet since Nov 2024; testnet is NU6+). If the
+  //      target chain has activated a later upgrade, update this. The robust
+  //      fix is to fetch consensus.nextblock from a node at runtime.
+  //   2. Both explorer endpoints below are DEAD (explorer.testnet.z.cash DNS
+  //      gone; blockchair has no zcash testnet). Wire a working provider before
+  //      live use. The zec leg supports a self-hosted node directly:
+  //        api: { style: 'zcashd', rpc: '<url>', rpcAuth: 'Basic <b64 user:pass>' }
+  //      (run zcashd with -insightexplorer for getaddressutxos). The zcashd
+  //      style ALSO resolves the branch id live (getblockchaininfo →
+  //      consensus.nextblock), so branchId above is then only a fallback.
+  //      Verified end-to-end against a self-hosted regtest node — see
+  //      .context/zec-verify/harness/verify-node.mjs.
   'zcash-testnet': {
     family: 'zec',
     addrType: 't-p2pkh',
     pubKeyHash2: [0x1d, 0x25],   // tm... transparent testnet
     scriptHash2: [0x1c, 0xba],
     api: { style: 'insight', base: 'https://explorer.testnet.z.cash/api',
-           fallback: 'https://api.blockchair.com/zcash/testnet' },
+           fallback: 'https://api.blockchair.com/zcash/testnet' }, // DEAD — see note above
     dust: 5460,
     amountField: 'satoshis',
     txVersion: 4,                // Sapling v4 (ZIP-243)
     versionGroupId: 0x892f2085,  // Sapling version group id
-    branchId: 0xc2d6d0b4,        // NU5 consensus branch id — VERIFY against active upgrade
-    defaultFeeRate: 10,          // zat/byte
-    minFee: 1000,                // zatoshis
+    branchId: 0xc8e71055,        // NU6 consensus branch id — MUST match active upgrade
+    // Fees follow ZIP-317 (zip317Fee in the zec leg), not these sat/byte values;
+    // kept only for reference. dust is the only field the zec leg still reads.
+    defaultFeeRate: 10,          // zat/byte (unused — ZIP-317 conventional fee applies)
+    minFee: 1000,                // zatoshis (unused)
     decimals: 8,
   },
 
