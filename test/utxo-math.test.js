@@ -6,7 +6,7 @@
 import { UTXO_MATH_SRC } from '../app/actions/lib/utxo-leg.js';
 import { strict as assert } from 'assert';
 
-const M = new Function(UTXO_MATH_SRC + '\n; return { selectCoins, drainCoins, feeFor, txVsize, SIZES_SEGWIT, SIZES_LEGACY };')();
+const M = new Function(UTXO_MATH_SRC + '\n; return { selectCoins, drainCoins, feeFor, txVsize, SIZES_SEGWIT, SIZES_LEGACY, zip317Fee, selectCoinsZip317, drainCoinsZip317 };')();
 
 const utxo = (n) => ({ amount: BigInt(n) });
 
@@ -65,6 +65,45 @@ test('drainCoins can return negative send when fee exceeds inputs (leg must guar
   // 1-in/1-out segwit fee = (11 + 68 + 31) * 2 = 220 > 100
   const r = M.drainCoins([utxo(100)], 2, M.SIZES_SEGWIT, 0);
   assert.ok(r.send < 0n, 'send goes negative; the leg guards with send <= dust -> null');
+});
+
+// ---- Zcash ZIP-317 conventional fee (verified against zcashd regtest) ----
+
+test('zip317Fee: grace floor of 2 actions for small txs (1-in/2-out = 10000 zat)', () => {
+  assert.equal(M.zip317Fee(1, 2), 10000n);
+  assert.equal(M.zip317Fee(1, 1), 10000n);
+  assert.equal(M.zip317Fee(2, 2), 10000n);
+});
+
+test('zip317Fee: scales by max(numIn, numOut) above the grace floor', () => {
+  assert.equal(M.zip317Fee(3, 2), 15000n); // 5000 * 3
+  assert.equal(M.zip317Fee(2, 5), 25000n); // 5000 * 5
+});
+
+test('selectCoinsZip317: covers amount + conventional fee', () => {
+  const r = M.selectCoinsZip317([utxo(1000000000)], 500000000n);
+  assert.equal(r.selected.length, 1);
+  assert.equal(r.fee, 10000n); // 1-in/2-out
+  assert.equal(r.change, 1000000000n - 500000000n - 10000n);
+});
+
+test('selectCoinsZip317: pulls more inputs and fee grows with action count', () => {
+  // 3 inputs needed: 2 cover 16000 < 8000+10000; the 3rd lifts the fee to
+  // zip317Fee(3,2)=15000 and total 24000 >= 8000+15000.
+  const r = M.selectCoinsZip317([utxo(8000n), utxo(8000n), utxo(8000n)], 8000n);
+  assert.equal(r.selected.length, 3);
+  assert.equal(r.fee, 15000n);
+  assert.equal(r.change, 24000n - 8000n - 15000n);
+});
+
+test('selectCoinsZip317: throws on insufficient funds', () => {
+  assert.throws(() => M.selectCoinsZip317([utxo(5000n)], 1000n), /insufficient/);
+});
+
+test('drainCoinsZip317: single output, fee = conventional for the input count', () => {
+  const r = M.drainCoinsZip317([utxo(1000000000n), utxo(2000000000n)]);
+  assert.equal(r.fee, 10000n); // 2-in/1-out -> max(2,1)=2 -> 10000
+  assert.equal(r.send, 3000000000n - 10000n);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
