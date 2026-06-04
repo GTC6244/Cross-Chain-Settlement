@@ -21,15 +21,15 @@ Eleven pairs across EVM, Bitcoin, Litecoin, Dogecoin, Zcash (transparent), and S
 |------|---------|---------------------|-------------|
 | EVM <> EVM | micro-eth-signer | settlement logic tested | `app/actions/evm-evm-action.js` |
 | EVM <> Bitcoin | micro-eth-signer + @scure/btc-signer | needs testnet | `app/actions/evm-btc-action.js` |
-| EVM <> Zcash | micro-eth-signer + ZIP-243 shim | **ZEC unverified** | `app/actions/evm-zec-action.js` |
-| Bitcoin <> Zcash | @scure/btc-signer + ZIP-243 shim | **ZEC unverified** | `app/actions/btc-zec-action.js` |
+| EVM <> Zcash | micro-eth-signer + ZIP-243 shim | ZIP-243 verified (regtest); needs live provider | `app/actions/evm-zec-action.js` |
+| Bitcoin <> Zcash | @scure/btc-signer + ZIP-243 shim | ZIP-243 verified (regtest); needs live provider | `app/actions/btc-zec-action.js` |
 | Bitcoin <> Litecoin | @scure/btc-signer | needs testnet | `app/actions/btc-ltc-action.js` |
 | Bitcoin <> Dogecoin | @scure/btc-signer (legacy P2PKH) | needs testnet + DOGE API | `app/actions/btc-doge-action.js` |
 | EVM <> Solana | micro-eth-signer + micro-sol-signer | needs devnet | `app/actions/evm-sol-action.js` |
 | Bitcoin <> Solana | @scure/btc-signer + micro-sol-signer | needs testnet/devnet | `app/actions/btc-sol-action.js` |
-| Zcash <> Solana | ZIP-243 shim + micro-sol-signer | **ZEC unverified** | `app/actions/zec-sol-action.js` |
-| Zcash <> Litecoin | ZIP-243 shim + @scure/btc-signer | **ZEC unverified** | `app/actions/zec-ltc-action.js` |
-| Zcash <> Dogecoin | ZIP-243 shim + @scure/btc-signer | **ZEC unverified** | `app/actions/zec-doge-action.js` |
+| Zcash <> Solana | ZIP-243 shim + micro-sol-signer | ZIP-243 verified (regtest); needs live provider | `app/actions/zec-sol-action.js` |
+| Zcash <> Litecoin | ZIP-243 shim + @scure/btc-signer | ZIP-243 verified (regtest); needs live provider | `app/actions/zec-ltc-action.js` |
+| Zcash <> Dogecoin | ZIP-243 shim + @scure/btc-signer | ZIP-243 verified (regtest); needs live provider | `app/actions/zec-doge-action.js` |
 
 The chain-agnostic settlement state machine (`runSwap`) is exercised by `test/engine.test.js`. The in-sandbox signing/broadcast for each chain runs only in the Lit runtime and requires live-testnet verification before production use.
 
@@ -175,7 +175,7 @@ All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "
 | Bitcoin (signet) | P2WPKH SegWit | mempool.space esplora | 546 sat | |
 | Litecoin (testnet) | P2WPKH SegWit | litecoinspace.org esplora | 546 lit | |
 | Dogecoin (testnet) | legacy P2PKH | blockchair | ~0.01 DOGE | testnet API base is a placeholder — confirm before use |
-| Zcash (testnet) | transparent t-addr | Insight + Blockchair | 5460 zat | **ZIP-243 v4 shim — unverified; branch id must match active upgrade** |
+| Zcash (testnet) | transparent t-addr | self-hosted zcashd (`style:'zcashd'`) or insight; public explorers are dead | 5460 zat | ZIP-243 v4 shim verified on zcashd regtest; ZIP-317 fees; branch id resolved live from the node (NU6 fallback) |
 | Solana (devnet) | Ed25519 | Solana JSON-RPC | — | seed = same 32-byte action key |
 
 ## Features
@@ -204,7 +204,9 @@ node test/evm-btc-action.test.js  # settlement flow (8)
 node test/_gen.mjs && for f in /tmp/genactions/*.mjs; do node --check "$f"; done
 ```
 
-`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions. The in-sandbox crypto (the signers and the ZIP-243 shim) runs only in the Lit runtime and is **not** covered by these tests — it needs live-testnet verification. Contract tests cover the full per-leg settlement lifecycle.
+`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions (including the Zcash ZIP-317 fee math). Most in-sandbox crypto (the BTC/LTC/DOGE/SOL signers) runs only in the Lit runtime and still needs live-testnet verification. Contract tests cover the full per-leg settlement lifecycle.
+
+The **Zcash ZIP-243 shim** — the highest-risk hand-rolled crypto — has been verified end-to-end against a local `zcashd` regtest node: the exact shipped `zecLegSrc()` builds and signs a transaction that zcashd's consensus engine accepts and mines (on both a Canopy and a NU6 chain). That harness, the findings, and a one-command reproduction live in `.context/zec-verify/`. Two bugs it surfaced (a stale hardcoded consensus branch id and a sub-ZIP-317 fee) are fixed.
 
 ## Setup
 

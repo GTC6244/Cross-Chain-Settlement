@@ -59,6 +59,42 @@ function drainCoins(utxos, feeRate, sizes, minFee) {
   var fee = feeFor(utxos.length, 1, sizes, feeRate, minFee);
   return { selected: utxos, fee: fee, send: total - fee };
 }
+
+// ---- Zcash ZIP-317 conventional fee (transparent only) ----
+// Zcash does not use a sat/byte fee; since NU5 the network enforces ZIP-317:
+//   conventional_fee = marginal_fee(5000 zat) * max(grace_actions(2), logical_actions)
+// For transparent-only txs, logical_actions = max(numIn, numOut). zcashd's
+// mempool rejects anything below this ("unpaid action limit exceeded"), so the
+// ZEC leg must pay exactly the conventional fee. Verified on zcashd regtest.
+function zip317Fee(numIn, numOut) {
+  var logical = numIn > numOut ? numIn : numOut;
+  var actions = logical > 2 ? logical : 2;
+  return BigInt(actions) * 5000n;
+}
+// ZIP-317 analogue of selectCoins (fixed per-action fee instead of sat/byte).
+function selectCoinsZip317(utxos, amount) {
+  var sorted = utxos.slice().sort(function (a, b) {
+    return a.amount < b.amount ? 1 : a.amount > b.amount ? -1 : 0;
+  });
+  var selected = [], total = 0n;
+  for (var i = 0; i < sorted.length; i++) {
+    selected.push(sorted[i]);
+    total += sorted[i].amount;
+    if (total >= amount + zip317Fee(selected.length, 2)) break;
+  }
+  var fee = zip317Fee(selected.length, 2);
+  if (total < amount + fee) {
+    throw new Error("insufficient utxo: have " + total + " need " + (amount + fee));
+  }
+  return { selected: selected, fee: fee, change: total - amount - fee };
+}
+// ZIP-317 analogue of drainCoins.
+function drainCoinsZip317(utxos) {
+  var total = 0n;
+  for (var i = 0; i < utxos.length; i++) total += utxos[i].amount;
+  var fee = zip317Fee(utxos.length, 1);
+  return { selected: utxos, fee: fee, send: total - fee };
+}
 `;
 
 // Assumes UTXO_MATH_SRC (selectCoins/drainCoins + SIZES_*) is already embedded.
