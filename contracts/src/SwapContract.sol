@@ -6,6 +6,26 @@ pragma solidity ^0.8.28;
  * @notice On-chain source of truth for cross-chain swaps via Lit Actions.
  *         Each swap has a unique Lit Action (IPFS CID) that controls
  *         deterministic deposit addresses across chains.
+ *
+ *         Two-sided market model:
+ *         - A user announces an *intent* off the settlement path via
+ *           `announceIntent` (a stateless event, no escrow). Solvers read the
+ *           `IntentAnnounced` log as an order book.
+ *         - A solver fills an intent by calling `createSwap` with the real
+ *           `destAmount` (>= the user's `minDestAmount` floor) and the four
+ *           role addresses. The settlement state machine
+ *           (Created -> Executed | Refunded) is unchanged.
+ *
+ *         FOUR-ADDRESS MODEL (settlement and refund use different chains, so
+ *         two address slots are not enough for a genuine two-party swap):
+ *
+ *             success (settle)         failure (refund)
+ *           source asset -> solverReceiveSource    userRefundSource
+ *           dest   asset -> userReceiveDest        solverRefundDest
+ *
+ *         The user provides userRefundSource (source chain) + userReceiveDest
+ *         (dest chain) in the intent; the solver provides solverReceiveSource
+ *         (source chain) + solverRefundDest (dest chain) at createSwap.
  */
 contract SwapContract {
     enum SwapState { Created, Funded, Executed, Refunded, Expired }
@@ -19,10 +39,15 @@ contract SwapContract {
         // Amounts in smallest unit (wei, satoshi, zatoshi)
         uint256 sourceAmount;
         uint256 destAmount;
+        // Floor the solver's destAmount had to meet (the user's intent minimum)
+        uint256 minDestAmount;
 
-        // Refund addresses (chain-specific format, stored as strings)
-        string refundAddressSource;
-        string refundAddressDest;
+        // Four role-based addresses (chain-specific format, stored as strings).
+        // See the FOUR-ADDRESS MODEL diagram above.
+        string userRefundSource;    // user, source chain  — refund of input on failure
+        string userReceiveDest;     // user, dest chain    — receives dest asset on success
+        string solverReceiveSource; // solver, source chain — receives source asset on success
+        string solverRefundDest;    // solver, dest chain  — refund of dest deposit on failure
 
         // Deposit addresses derived from Lit Action key
         string depositAddressSource;
@@ -38,6 +63,12 @@ contract SwapContract {
 
         // Lit Action
         string litActionCid;
+        // The salt that produced the CID — emitted + stored so the user app can
+        // recompute and verify the CID against the audited template.
+        string salt;
+
+        // Links this swap back to the user's announced intent (order book join key)
+        bytes32 intentId;
 
         // State
         SwapState state;
@@ -68,13 +99,37 @@ contract SwapContract {
     uint256 public swapCount;
     mapping(uint256 => Swap) public swaps;
 
+    /**
+     * @notice A user's swap intent, broadcast for solvers to fill. Carries no
+     *         on-chain state and moves no funds — it is purely an order-book
+     *         beacon. `msg.sender` (indexed `creator`) authenticates the user,
+     *         so no separate signature layer is needed.
+     */
+    event IntentAnnounced(
+        bytes32 indexed intentId,
+        address indexed creator,
+        string sourceChain,
+        string destChain,
+        uint256 sourceAmount,
+        uint256 minDestAmount,
+        uint256 expiration,
+        uint16 feeBps,
+        address tokenSource,
+        address tokenDest,
+        string userRefundSource,
+        string userReceiveDest
+    );
+
     event SwapCreated(
         uint256 indexed swapId,
+        bytes32 indexed intentId,
         string sourceChain,
         string destChain,
         uint256 sourceAmount,
         uint256 destAmount,
+        uint256 minDestAmount,
         string litActionCid,
+        string salt,
         address creator
     );
     event SwapExecuted(uint256 indexed swapId);
@@ -106,42 +161,106 @@ contract SwapContract {
     }
 
     /**
-     * @notice Create a new swap record
+     * @notice Announce a swap intent for solvers to discover and fill. Emits an
+     *         event only — no storage write, no state, no escrow. The basic
+     *         sanity checks keep obviously-invalid intents out of the order book.
+     * @param intentId Client-generated id (links to the resulting swap)
+     * @param sourceChain Chain the user will send from
+     * @param destChain Chain the user wants to receive on
+     * @param sourceAmount Amount the user will provide (smallest unit)
+     * @param minDestAmount Minimum the user will accept on dest (the floor)
+     * @param expiration Unix timestamp after which the intent is stale
+     * @param feeBps Fee in basis points (0-10000)
+     * @param tokenSource ERC-20 on source (address(0) = native)
+     * @param tokenDest ERC-20 on dest (address(0) = native)
+     * @param userRefundSource User's source-chain address (refund on failure)
+     * @param userReceiveDest User's dest-chain address (receives on success)
+     */
+    function announceIntent(
+        bytes32 intentId,
+        string calldata sourceChain,
+        string calldata destChain,
+        uint256 sourceAmount,
+        uint256 minDestAmount,
+        uint256 expiration,
+        uint16 feeBps,
+        address tokenSource,
+        address tokenDest,
+        string calldata userRefundSource,
+        string calldata userReceiveDest
+    ) external {
+        require(sourceAmount > 0, "source amount zero");
+        require(minDestAmount > 0, "min dest zero");
+        require(expiration > block.timestamp, "already expired");
+        require(feeBps <= 10000, "fee too high");
+
+        emit IntentAnnounced(
+            intentId,
+            msg.sender,
+            sourceChain,
+            destChain,
+            sourceAmount,
+            minDestAmount,
+            expiration,
+            feeBps,
+            tokenSource,
+            tokenDest,
+            userRefundSource,
+            userReceiveDest
+        );
+    }
+
+    /**
+     * @notice Create a new swap record. In the two-sided model this is called
+     *         by a solver filling an announced intent: it supplies the real
+     *         `destAmount` (>= `minDestAmount`) and the four role addresses.
+     * @param intentId The announced intent this swap fills (0x0 if direct)
      * @param sourceChain Chain identifier for source (e.g., "base-sepolia")
      * @param destChain Chain identifier for destination (e.g., "bitcoin-signet")
      * @param sourceAmount Amount expected on source chain (smallest unit)
      * @param destAmount Amount expected on destination chain (smallest unit)
-     * @param refundAddressSource Address for refund on source chain
-     * @param refundAddressDest Address for refund on destination chain
+     * @param minDestAmount Floor from the intent; destAmount must be >= this
+     * @param userRefundSource User's source-chain refund address
+     * @param userReceiveDest User's dest-chain receive address
+     * @param solverReceiveSource Solver's source-chain receive address
+     * @param solverRefundDest Solver's dest-chain refund address
      * @param depositAddressSource Deposit address on source chain (from Lit key)
      * @param depositAddressDest Deposit address on destination chain (from Lit key)
      * @param confirmationBlocks Required block confirmations before execution
      * @param expirationTimestamp Unix timestamp after which swap can be refunded
      * @param feeBps Fee in basis points (0-10000)
      * @param litActionCid IPFS CID of the Lit Action for this swap
+     * @param salt Salt that produced the CID (emitted + stored for CID verify)
      * @param litActionEvmAddress EVM address derived from the Lit Action's key
      * @param tokenAddressSource ERC-20 token on source chain (address(0) = native)
      * @param tokenAddressDest ERC-20 token on dest chain (address(0) = native)
      */
     function createSwap(
+        bytes32 intentId,
         string calldata sourceChain,
         string calldata destChain,
         uint256 sourceAmount,
         uint256 destAmount,
-        string calldata refundAddressSource,
-        string calldata refundAddressDest,
+        uint256 minDestAmount,
+        string calldata userRefundSource,
+        string calldata userReceiveDest,
+        string calldata solverReceiveSource,
+        string calldata solverRefundDest,
         string calldata depositAddressSource,
         string calldata depositAddressDest,
         uint256 confirmationBlocks,
         uint256 expirationTimestamp,
         uint16 feeBps,
         string calldata litActionCid,
+        string calldata salt,
         address litActionEvmAddress,
         address tokenAddressSource,
         address tokenAddressDest
     ) external returns (uint256 swapId) {
         require(sourceAmount > 0, "source amount zero");
         require(destAmount > 0, "dest amount zero");
+        require(minDestAmount > 0, "min dest zero");
+        require(destAmount >= minDestAmount, "below floor");
         require(expirationTimestamp > block.timestamp, "already expired");
         require(feeBps <= 10000, "fee too high");
         require(litActionEvmAddress != address(0), "zero lit action address");
@@ -153,8 +272,11 @@ contract SwapContract {
         s.destChain = destChain;
         s.sourceAmount = sourceAmount;
         s.destAmount = destAmount;
-        s.refundAddressSource = refundAddressSource;
-        s.refundAddressDest = refundAddressDest;
+        s.minDestAmount = minDestAmount;
+        s.userRefundSource = userRefundSource;
+        s.userReceiveDest = userReceiveDest;
+        s.solverReceiveSource = solverReceiveSource;
+        s.solverRefundDest = solverRefundDest;
         s.depositAddressSource = depositAddressSource;
         s.depositAddressDest = depositAddressDest;
         s.confirmationBlocks = confirmationBlocks;
@@ -162,6 +284,8 @@ contract SwapContract {
         s.feeBps = feeBps;
         s.feeModel = FeeModel.RearLoaded;
         s.litActionCid = litActionCid;
+        s.salt = salt;
+        s.intentId = intentId;
         s.state = SwapState.Created;
         s.creator = msg.sender;
         s.createdAt = block.timestamp;
@@ -171,11 +295,14 @@ contract SwapContract {
 
         emit SwapCreated(
             swapId,
+            intentId,
             sourceChain,
             destChain,
             sourceAmount,
             destAmount,
+            minDestAmount,
             litActionCid,
+            salt,
             msg.sender
         );
     }
@@ -281,13 +408,18 @@ contract SwapContract {
     }
 
     /**
-     * @notice Get swap chain and address details
+     * @notice Get swap chain and address details.
+     *         Returns the four role addresses (see FOUR-ADDRESS MODEL) followed
+     *         by the two deposit addresses and confirmation blocks. The off-chain
+     *         engine decodes these positionally — keep the order in sync.
      */
     function getSwapAddresses(uint256 swapId) external view returns (
         string memory sourceChain,
         string memory destChain,
-        string memory refundAddressSource,
-        string memory refundAddressDest,
+        string memory userRefundSource,
+        string memory userReceiveDest,
+        string memory solverReceiveSource,
+        string memory solverRefundDest,
         string memory depositAddressSource,
         string memory depositAddressDest,
         uint256 confirmationBlocks
@@ -296,12 +428,28 @@ contract SwapContract {
         return (
             s.sourceChain,
             s.destChain,
-            s.refundAddressSource,
-            s.refundAddressDest,
+            s.userRefundSource,
+            s.userReceiveDest,
+            s.solverReceiveSource,
+            s.solverRefundDest,
             s.depositAddressSource,
             s.depositAddressDest,
             s.confirmationBlocks
         );
+    }
+
+    /**
+     * @notice Get the intent linkage, dest-amount floor, and CID salt for a swap.
+     *         The engine reads `minDestAmount` to assert the settled `destAmount`
+     *         honored the floor; the user app reads `salt` to verify the CID.
+     */
+    function getSwapIntent(uint256 swapId) external view returns (
+        bytes32 intentId,
+        uint256 minDestAmount,
+        string memory salt
+    ) {
+        Swap storage s = swaps[swapId];
+        return (s.intentId, s.minDestAmount, s.salt);
     }
 
     /**
