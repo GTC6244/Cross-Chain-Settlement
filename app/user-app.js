@@ -10,7 +10,7 @@ import {
 } from './lib/contract.js';
 import { CHAIN_FAMILY } from './lib/derive.js';
 import { readQuotesForIntent, effectiveRate } from './lib/intents.js';
-import { verifySwapCid } from './lib/verify.js';
+import { verifySwapCid, fullVerifySwap, intentMatches } from './lib/verify.js';
 import { log, clearLog, showTab, toggleTheme, initThemeLabel } from './lib/ui.js';
 
 const CHAINS = [
@@ -93,6 +93,16 @@ async function announceIntent() {
     );
     log(out, 'Tx submitted: ' + tx.hash, 'dim');
     await tx.wait();
+    // Store the intent locally (keys match the on-chain swap object) so we can
+    // later assert a solver's fill wasn't tampered with — see fundQuote / H-2.
+    try {
+      localStorage.setItem('intent_' + intentId, JSON.stringify({
+        sourceChain, destChain, sourceAmount, minDestAmount,
+        userRefundSource, userReceiveDest, feeBps,
+        tokenAddressSource: tokenSource, tokenAddressDest: tokenDest,
+        creator: userAddress,
+      }));
+    } catch (e) {}
     log(out, '');
     log(out, '=== Intent announced ===', 'success');
     log(out, 'Intent ID: ' + intentId);
@@ -148,10 +158,14 @@ async function quoteRow(q, isBest) {
     </div>
     <button class="btn btn-primary fund-btn" data-swap="${q.swapId}">Fund this quote</button>`;
   row.querySelector('.fund-btn').addEventListener('click', () => fundQuote(q.swapId));
-  // verify async, then patch the badge
+  // CID check is a cheap first screen (proves the code is the audited template).
+  // It is NOT sufficient to fund — the deposit-address + intent checks run at
+  // fund time (see fundQuote). Badge wording must not overstate (audit H-1).
   verifySwapCid(q).then((v) => {
     const span = row.querySelector('.rate');
-    const badge = v.match ? '<span class="verify-ok">✓ CID verified</span>' : '<span class="verify-bad">✗ CID mismatch — do not fund</span>';
+    const badge = v.match
+      ? '<span class="verify-ok">✓ code matches template</span> <span class="rate">(deposit + intent verified when you fund)</span>'
+      : '<span class="verify-bad">✗ code mismatch — do not fund</span>';
     span.innerHTML = `rate ${rate} · solver ${q.solver.slice(0, 6)}…${q.solver.slice(-4)} · ${badge}`;
     if (!v.match) row.querySelector('.fund-btn').disabled = true;
   }).catch(() => {});
@@ -159,12 +173,47 @@ async function quoteRow(q, isBest) {
 }
 
 // ---- fund the chosen quote (source leg) -----------------------------------
+// Funding is the user's commitment, so it runs THREE checks first, all of which
+// must pass before any value moves (audit findings H-1 / H-2):
+//   - intent cross-check: the on-chain swap matches the intent you announced
+//   - CID + deposit derivation: the deposit address is the one the audited code
+//     actually derives (not an address the solver swapped in)
 async function fundQuote(swapId) {
   const out = 'quotes-output';
   clearLog(out);
   if (!signer) { log(out, 'Connect wallet first.', 'error'); return; }
   try {
     const s = await readSwap(swapId);
+
+    // H-2: assert the fill honors the intent YOU announced from this browser.
+    const stored = localStorage.getItem('intent_' + s.intentId);
+    if (!stored) {
+      log(out, 'BLOCKED: no local record of intent ' + s.intentId + '.', 'error');
+      log(out, 'Only fund swaps that fill an intent you announced from this browser, so the solver-supplied fields can be verified.', 'error');
+      return;
+    }
+    const im = intentMatches(s, JSON.parse(stored));
+    if (!im.match) {
+      log(out, 'BLOCKED: this swap does not match your intent. Mismatched: ' + im.mismatches.join(', '), 'error');
+      log(out, 'A solver may have altered your receive address, floor, amount, or fee. Do NOT fund.', 'error');
+      return;
+    }
+
+    // H-1: prove the deposit address is the one the audited code derives.
+    const litKey = document.getElementById('quotes-lit-key').value.trim();
+    if (!litKey) { log(out, 'Enter your Lit API key — needed to verify the deposit address before funding.', 'error'); return; }
+    log(out, 'Verifying CID + deriving deposit address from the audited code…', 'dim');
+    const v = await fullVerifySwap(s, litKey);
+    if (!v.match) {
+      log(out, 'BLOCKED: verification failed — DO NOT fund.', 'error');
+      if (!v.cid.match) log(out, '  CID mismatch (code is not the audited template).', 'error');
+      if (!v.deposits.checks.depositAddressSource) log(out, '  Source deposit address does not match the derived address.', 'error');
+      if (!v.deposits.checks.depositAddressDest) log(out, '  Dest deposit address does not match the derived address.', 'error');
+      if (!v.deposits.checks.litActionEvmAddress) log(out, '  Lit Action EVM address mismatch.', 'error');
+      return;
+    }
+    log(out, 'Verified: code is the audited template and the deposit address is derived from it.', 'success');
+
     log(out, 'Funding swap #' + swapId + ' source leg', 'dim');
     log(out, 'Send ' + s.sourceAmount.toString() + ' on ' + s.sourceChain);
     log(out, 'Deposit address: ' + s.depositAddressSource);

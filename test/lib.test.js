@@ -7,7 +7,7 @@
 import { strict as assert } from 'assert';
 import { randomSalt, templateKeyForChains, pickDeposit } from '../app/lib/derive.js';
 import { chunkRanges, effectiveRate, groupQuotesByIntent, sortQuotesByRate } from '../app/lib/intents.js';
-import { compareCid } from '../app/lib/verify.js';
+import { compareCid, intentMatches } from '../app/lib/verify.js';
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -95,6 +95,41 @@ await test('sortQuotesByRate: best (highest dest/source) first, input not mutate
 await test('compareCid: match / mismatch', async () => {
   assert.equal(compareCid('Qm123', 'Qm123').match, true);
   assert.equal(compareCid('Qm123', 'Qm999').match, false);
+});
+
+// ---- intent cross-check (H-2) ----
+const INTENT = {
+  sourceChain: 'base-sepolia', destChain: 'bitcoin-signet',
+  userRefundSource: '0xUser', userReceiveDest: 'tb1qUser',
+  sourceAmount: 1000000n, minDestAmount: 100000n, feeBps: 50,
+  tokenAddressSource: '0x0000000000000000000000000000000000000000',
+  tokenAddressDest: '0x0000000000000000000000000000000000000000',
+};
+function swapFrom(over = {}) { return { ...INTENT, ...over }; }
+
+await test('intentMatches: identical fill matches', async () => {
+  assert.equal(intentMatches(swapFrom(), INTENT).match, true);
+});
+
+await test('intentMatches: a HIGHER floor is allowed (solver may quote better)', async () => {
+  assert.equal(intentMatches(swapFrom({ minDestAmount: 150000n }), INTENT).match, true);
+});
+
+await test('intentMatches: a LOWER floor is rejected', async () => {
+  const r = intentMatches(swapFrom({ minDestAmount: 99999n }), INTENT);
+  assert.equal(r.match, false);
+  assert.ok(r.mismatches.includes('minDestAmount'));
+});
+
+await test('intentMatches: tampered userReceiveDest is rejected', async () => {
+  const r = intentMatches(swapFrom({ userReceiveDest: 'tb1qAttacker' }), INTENT);
+  assert.equal(r.match, false);
+  assert.ok(r.mismatches.includes('userReceiveDest'));
+});
+
+await test('intentMatches: tampered sourceAmount / feeChain flagged', async () => {
+  assert.ok(intentMatches(swapFrom({ sourceAmount: 999999n }), INTENT).mismatches.includes('sourceAmount'));
+  assert.ok(intentMatches(swapFrom({ feeBps: 300 }), INTENT).mismatches.includes('feeBps'));
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -264,6 +264,15 @@ contract SwapContract {
         require(expirationTimestamp > block.timestamp, "already expired");
         require(feeBps <= 10000, "fee too high");
         require(litActionEvmAddress != address(0), "zero lit action address");
+        // L-2: reject empty address strings so a swap can't be bricked or
+        // misrouted by a missing role/deposit address (the contract holds no
+        // funds, but the off-chain settlement would send to an empty string).
+        require(bytes(userRefundSource).length > 0, "empty userRefundSource");
+        require(bytes(userReceiveDest).length > 0, "empty userReceiveDest");
+        require(bytes(solverReceiveSource).length > 0, "empty solverReceiveSource");
+        require(bytes(solverRefundDest).length > 0, "empty solverRefundDest");
+        require(bytes(depositAddressSource).length > 0, "empty depositAddressSource");
+        require(bytes(depositAddressDest).length > 0, "empty depositAddressDest");
 
         swapId = swapCount++;
 
