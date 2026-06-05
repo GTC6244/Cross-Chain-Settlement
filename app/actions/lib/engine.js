@@ -89,7 +89,10 @@ async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
   } catch (e) {
     gasLimit = data && data !== "0x" ? 120000n : 21000n; // fallback
   }
-  var tx = EthTx.prepare({
+  // micro-eth-signer rejects an explicit undefined data field ("fields had
+  // validation errors"); the key must be ABSENT for plain value transfers.
+  // Only set it for contract calls (settle/drain/fee pass data=null).
+  var txFields = {
     to: to,
     value: value,
     nonce: BigInt(nonce),
@@ -97,8 +100,9 @@ async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
     maxPriorityFeePerGas: maxPriorityFeePerGas,
     gasLimit: gasLimit,
     chainId: BigInt(chainId),
-    data: data || undefined,
-  });
+  };
+  if (data && data !== "0x") txFields.data = data;
+  var tx = EthTx.prepare(txFields);
   var signed = tx.signBy(ctx.keyBytes);
   var raw = signed.toHex();
   var rawHex = raw.indexOf("0x") === 0 ? raw : "0x" + raw;
