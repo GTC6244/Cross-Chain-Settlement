@@ -50,6 +50,49 @@ pair runs only in the Lit runtime and is not covered by the Node tests.
   General Sans loads from the Fontshare CDN. If font sources are locked down,
   self-host it. Do not fall back to Inter (see `DESIGN.md`).
 
+## Two-Sided Market (RFQ)
+
+Splitting the single UI into a user (intent) interface + a solver (quote) interface.
+Full plan: `docs/plans/two-sided-rfq-plan.md`. ENG + DESIGN reviewed/cleared.
+
+- **Implement the two-sided market (signed-intent + solver-builds-swap)**
+  **Priority:** P2
+  Lane A first: contract `F1` four-address fix (`userRefundSource`/`userReceiveDest`/
+  `solverReceiveSource`/`solverRefundDest`) + stateless `announceIntent` event +
+  `createSwap` gains `intentId`/`minDestAmount` + Foundry tests + audit-the-diff. Then
+  engine 4-address mapping + floor assert (`engine.js`), then split `index.html`
+  (user) and new `solver.html` from a shared `app/lib/*` core. Settlement state machine
+  stays UNCHANGED. Design spec (order book = warm ledger rows, deliberate fund, pro
+  density) is in the plan.
+
+- **F1: four-address model is a latent cross-chain bug (fix even if RFQ slips)**
+  **Priority:** P1
+  `engine.js` uses `refundAddressSource`/`refundAddressDest` on opposite chains in
+  settle vs refund paths. Only safe today because the demo points all four roles at one
+  EVM wallet on EVM↔EVM. A real cross-family swap refunds to the wrong chain → lost
+  funds. Needs the four role-named addresses + a mapping test.
+
+- **Phase-2: competitive price auction**
+  **Priority:** P3
+  v1 competition is "each solver builds a swap with its quote; user funds the best."
+  Real price discovery, but each quote costs the solver gas. A formal on-chain timed
+  auction or off-chain RFQ relay would tighten spreads. Deferred until solver behavior
+  is observed in v1.
+
+- **Phase-2: gasless quote channel**
+  **Priority:** P3
+  Today a solver pays gas to `createSwap` even for a quote the user doesn't pick. A
+  signed-quote relay (solver posts a signed offer, only the winning quote hits the
+  chain) removes that cost and lowers the barrier to quoting. Depends on the v1 model
+  shipping first.
+
+- **Phase-2: real-time order book (push instead of poll)**
+  **Priority:** P3
+  v1 order book is a client-side `getLogs` scan on an interval + manual refresh, with a
+  visible "some may be missing — rescanning" state on RPC range limits. A websocket /
+  push feed (or a light indexer) would make it live. Keep the no-backend constraint in
+  mind — evaluate public relays before standing up a server.
+
 ## Tooling / QA
 
 - **Build the gstack browse + design binaries**
