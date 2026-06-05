@@ -180,28 +180,35 @@ contract SwapContractTest is Test {
         assertTrue(expirationTimestamp > block.timestamp);
     }
 
-    // F1: the four role addresses must round-trip in the correct slots. A
-    // positional-decode slip here is the class of bug that sends funds to the
-    // wrong chain — this test is the guardrail for it.
-    function test_createSwap_fourAddressesRoundTrip() public {
+    // M-2 / F1: getSwapAddresses is decoded POSITIONALLY by the in-action engine
+    // (app/actions/lib/engine.js:205-210: userRefundSource=addrs[2] …
+    // solverRefundDest=addrs[5], depositSource=addrs[6], depositDest=addrs[7]).
+    // This test pins every slot with a DISTINCT sentinel so a one-slot drift
+    // between this contract's return order and the engine's index map fails
+    // loudly here — the class of bug that silently sends funds to the wrong chain.
+    function test_createSwap_getSwapAddresses_slotOrder() public {
         uint256 swapId = _createTestSwap();
         (
-            , , // sourceChain, destChain
-            string memory userRefundSource,
-            string memory userReceiveDest,
-            string memory solverReceiveSource,
-            string memory solverRefundDest,
-            string memory depositAddressSource,
-            string memory depositAddressDest,
-            // confirmationBlocks
+            string memory sourceChain,        // [0]
+            string memory destChain,          // [1]
+            string memory userRefundSource,   // [2]
+            string memory userReceiveDest,    // [3]
+            string memory solverReceiveSource,// [4]
+            string memory solverRefundDest,   // [5]
+            string memory depositAddressSource,// [6]
+            string memory depositAddressDest, // [7]
+            uint256 confirmationBlocks        // [8]
         ) = swap.getSwapAddresses(swapId);
 
-        assertEq(userRefundSource, USER_REFUND_SRC);
-        assertEq(userReceiveDest, USER_RECV_DEST);
-        assertEq(solverReceiveSource, SOLVER_RECV_SRC);
-        assertEq(solverRefundDest, SOLVER_REFUND_DEST);
-        assertEq(depositAddressSource, "0xDepositSource");
-        assertEq(depositAddressDest, "tb1qDepositDest");
+        assertEq(sourceChain, "base-sepolia",          "[0] sourceChain");
+        assertEq(destChain, "bitcoin-signet",          "[1] destChain");
+        assertEq(userRefundSource, USER_REFUND_SRC,    "[2] userRefundSource");
+        assertEq(userReceiveDest, USER_RECV_DEST,      "[3] userReceiveDest");
+        assertEq(solverReceiveSource, SOLVER_RECV_SRC, "[4] solverReceiveSource");
+        assertEq(solverRefundDest, SOLVER_REFUND_DEST, "[5] solverRefundDest");
+        assertEq(depositAddressSource, "0xDepositSource", "[6] depositAddressSource");
+        assertEq(depositAddressDest, "tb1qDepositDest","[7] depositAddressDest");
+        assertEq(confirmationBlocks, 1,                "[8] confirmationBlocks");
     }
 
     function test_createSwap_storesIntentAndFloor() public {
@@ -276,6 +283,27 @@ contract SwapContractTest is Test {
     function test_createSwap_revert_belowFloor() public {
         vm.expectRevert("below floor");
         _create(1 ether, 99999, 100000, block.timestamp + 1, 50, litActionAddr);
+    }
+
+    // L-2: every address string must be non-empty (one per slot).
+    function test_createSwap_revert_emptyUserReceiveDest() public {
+        vm.expectRevert("empty userReceiveDest");
+        swap.createSwap(
+            INTENT_ID, "a", "b", 1 ether, 100000, 100000,
+            "ur", "", "sr", "sd", "ds", "dd",
+            1, block.timestamp + 1 hours, 50, "cid", "salt", litActionAddr,
+            address(0), address(0)
+        );
+    }
+
+    function test_createSwap_revert_emptyDepositAddressSource() public {
+        vm.expectRevert("empty depositAddressSource");
+        swap.createSwap(
+            INTENT_ID, "a", "b", 1 ether, 100000, 100000,
+            "ur", "ud", "sr", "sd", "", "dd",
+            1, block.timestamp + 1 hours, 50, "cid", "salt", litActionAddr,
+            address(0), address(0)
+        );
     }
 
     function test_createSwap_revert_expired() public {

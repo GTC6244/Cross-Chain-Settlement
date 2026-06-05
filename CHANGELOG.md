@@ -5,6 +5,18 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- Before you fund a solver's quote, the app now derives the deposit address from
+  the swap's audited code (via your Lit key) and confirms it matches the on-chain
+  address — a green "code verified" badge alone is no longer enough to fund. Closes
+  an issue where a solver could post real audited code but a deposit address it
+  controlled (audit H-1).
+- The app also cross-checks the on-chain swap against the intent you announced
+  (receive address, amount, fee, and that the floor wasn't lowered) and refuses to
+  fund on any mismatch (audit H-2).
+- The contract rejects empty role/deposit address strings in `createSwap`, so a swap
+  can't be bricked or misrouted by a missing address (audit L-2).
+
 ### Added
 - Two-sided market. Post a swap as an *intent* (what you'll send, the minimum
   you'll accept) and let solvers compete to fill it. You compare their quotes and
