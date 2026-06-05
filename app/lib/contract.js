@@ -69,11 +69,12 @@ export function writeContract(signer) {
  */
 export async function readSwap(swapId) {
   const c = readContract();
-  const [state, addrs, intent, legs] = await Promise.all([
+  const [state, addrs, intent, legs, tokens] = await Promise.all([
     c.getSwapState(swapId),
     c.getSwapAddresses(swapId),
     c.getSwapIntent(swapId),
     c.getSwapLegs(swapId),
+    c.getSwapTokens(swapId),
   ]);
   return {
     swapId: String(swapId),
@@ -102,5 +103,7 @@ export async function readSwap(swapId) {
     destLegSettled: legs[1],
     sourceLegTxHash: legs[2],
     destLegTxHash: legs[3],
+    tokenAddressSource: tokens[0],
+    tokenAddressDest: tokens[1],
   };
 }

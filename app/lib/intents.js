@@ -116,7 +116,8 @@ function quoteFromLog(log) {
  */
 export async function readOpenIntents(fromBlock = CONTRACT_DEPLOY_BLOCK, toBlock = 'latest') {
   const c = readContract();
-  const head = toBlock === 'latest' ? await c.runner.provider.getBlockNumber() : toBlock;
+  const provider = c.runner.provider ?? c.runner; // a provider-runner has no `.provider`; a signer-runner does
+  const head = toBlock === 'latest' ? await provider.getBlockNumber() : toBlock;
   const res = await scanEvents(c, c.filters.IntentAnnounced(), fromBlock, head);
   const now = Math.floor(Date.now() / 1000);
   const intents = res.events.map(intentFromLog).filter((i) => i.expiration > now);
@@ -126,7 +127,8 @@ export async function readOpenIntents(fromBlock = CONTRACT_DEPLOY_BLOCK, toBlock
 /** Read all competing quotes (SwapCreated) for a given intentId, best rate first. */
 export async function readQuotesForIntent(intentId, fromBlock = CONTRACT_DEPLOY_BLOCK, toBlock = 'latest') {
   const c = readContract();
-  const head = toBlock === 'latest' ? await c.runner.provider.getBlockNumber() : toBlock;
+  const provider = c.runner.provider ?? c.runner; // a provider-runner has no `.provider`; a signer-runner does
+  const head = toBlock === 'latest' ? await provider.getBlockNumber() : toBlock;
   const res = await scanEvents(c, c.filters.SwapCreated(null, intentId), fromBlock, head);
   return { quotes: sortQuotesByRate(res.events.map(quoteFromLog)), complete: res.complete, error: res.error };
 }
