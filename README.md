@@ -2,14 +2,14 @@
 
 Trustless cross-chain swaps using [Lit Protocol](https://developer.litprotocol.com/) Lit Actions as the custodian, with each swap's signing key generated and used only inside a Trusted Execution Environment (TEE). No bridges, no wrapped tokens, no HTLC complexity.
 
-## How it works
+It's a two-sided market: a **user** posts what they want to swap, and **solvers** compete to fill it.
 
-1. A Solidity contract on Base records swap intent (chains, amounts, fees, expiration)
-2. A unique Lit Action is generated per swap (salt injection gives a unique IPFS CID, which gives a unique private key, which gives unique deposit addresses)
-3. Both parties deposit to their respective chain's deposit address
-4. Anyone triggers the Lit Action, which reads the contract, verifies balances, and settles both legs
+1. A user announces a swap *intent* on a Base contract (chains, source amount, minimum dest amount) via a stateless `announceIntent` event. No funds move, nothing is escrowed.
+2. Solvers watch the intent order book and compete. Each builds a swap with `createSwap`, quoting a `destAmount ≥ minDestAmount`. Every swap gets its own salt → unique IPFS CID → unique private key → unique deposit addresses.
+3. The user compares the competing quotes, auto-verifies the chosen swap's CID against the audited template, and funds the source leg of the best one. Funding is the commitment — nothing is at risk before the user picks.
+4. The solver funds the dest leg and triggers the Lit Action, which reads the contract, verifies balances, and settles both legs.
 5. Each leg is logged to the contract as it completes. If execution fails mid-swap, re-running the action picks up where it left off.
-6. Once both legs are settled, the action signs a cryptographic receipt and marks the swap executed
+6. Once both legs are settled, the action signs a cryptographic receipt and marks the swap executed.
 
 The Lit Action's private key is generated and used only inside a Trusted Execution Environment (TEE), attested by a complete root-of-trust system. No one, not even Lit, can extract it.
 
@@ -36,30 +36,36 @@ The chain-agnostic settlement state machine (`runSwap`) is exercised by `test/en
 ## Architecture
 
 ```
-User (browser)
-  |
-  +-- Create swap --> SwapContract.sol (Base)
-  |                      |
-  |                      +-- Stores: chains, amounts, fees,
-  |                      |   expiration, deposit addresses,
-  |                      |   Lit Action CID, ERC-20 tokens,
-  |                      |   per-leg settlement status
-  |                      |
-  +-- Fund -----------> Deposit addresses (derived from Lit Action key)
-  |
-  +-- Execute --------> Lit Chipotle REST API
-                            |
-                            +-- Lit Action runs:
-                                1. Read swap params + leg status from contract
-                                2. Skip already-settled legs
-                                3. Check balances for unsettled legs
-                                4. Settle slower chain first
-                                5. Log each leg to contract (markLegSettled)
-                                6. Send fees to contract owner
-                                7. Sweep excess to refund address
-                                8. Mark executed (requires both legs)
-                                9. Sign receipt
+USER (index.html)              SwapContract.sol (Base)         SOLVER (solver.html)
+  |                                  |                               |
+  +-- announceIntent ----------------> emits IntentAnnounced ------->  order book
+  |   (chains, source amt,            |   (no storage, no escrow)      pick + quote
+  |    min dest amt; no funds)        |                               |
+  |                                   <---- createSwap ----------------+
+  |   compare quotes,                 |   (real destAmount >= floor,   own salt ->
+  |   auto-verify CID  <-- SwapCreated|    four role addresses, CID)   own deposits
+  |                                   |                               |
+  +-- fund SOURCE leg --> deposit addr (derived from this swap's Lit Action key)
+  |                                                                   |
+  |                                          fund DEST leg <----------+
+  |                                          + Execute --> Lit Chipotle REST API
+  |                                                            |
+  |                                                            +-- Lit Action runs:
+  |                                                                1. Read swap params + legs
+  |                                                                2. Skip already-settled legs
+  |                                                                3. Check balances + dest floor
+  |                                                                4. Settle slower chain first
+  |                                                                5. Log each leg (markLegSettled)
+  |                                                                6. Send fees to contract owner
+  |                                                                7. Sweep excess to refund addrs
+  |                                                                8. Mark executed (both legs)
+  +-- watch settlement <---------------------------------------- 9. Sign receipt
 ```
+
+The settlement cross uses a **four-address model** so a real two-party swap is safe
+across chains: on success the source asset pays the solver (`solverReceiveSource`)
+and the dest asset pays the user (`userReceiveDest`); on expiry each side is refunded
+to its own chain (`userRefundSource` / `solverRefundDest`).
 
 ## Per-leg settlement and recovery
 
@@ -97,33 +103,49 @@ The contract stores the tx hash for each leg, making every settlement step audit
 
 ## Web app
 
-Static HTML + vanilla JS. No build step. No framework. No backend.
+Static HTML + vanilla ES modules. No build step. No framework. No backend.
+Two role-scoped apps share one design system and one shared core.
 
 ```
 app/
-  index.html        # UI with 5 tabs
-  swap-engine.js    # All swap logic
+  index.html        # USER app — announce intent, compare quotes, fund best, watch settlement
+  user-app.js       #   user controller
+  solver.html       # SOLVER app — order book, quote + create swap, fund dest, execute
+  solver-app.js     #   solver controller
+  settled.css       # shared "Settled" design system (see DESIGN.md)
+  lib/              # shared browser core (ES modules)
+    contract.js     #   config + the single browser ABI home + readSwap()
+    derive.js       #   random salt, template dispatch, CID + address derivation
+    intents.js      #   order-book reader (chunked log scan, quote grouping/sort)
+    verify.js       #   recompute + compare CID against the audited template
+    ui.js           #   shared status-box / tabs / theme chrome
+    templates.js    #   registers the 11 action generators on window.ActionTemplates
   actions/          # audited action templates + lib/ (loaded as ES modules)
 ```
 
-Tabs: **Create** | **Status** | **Execute** | **Gas Preview** | **Verify CID**
+The **user app** flow is Announce → Quotes → Status. The **solver app** flow is Order
+Book → Quote → My Fills. `lib/templates.js` imports the action-template generators and
+exposes them on `window.ActionTemplates`; `lib/derive.js` dispatches to them by pair.
+(Loading those modules does not fetch jsDelivr — the jsDelivr imports live only inside
+the generated action strings.)
 
-A small `<script type="module">` in `index.html` imports the action-template generators and exposes them on `window.ActionTemplates`; the classic `swap-engine.js` dispatches to them by pair. (Loading those modules does not fetch jsDelivr — the jsDelivr imports live only inside the generated action strings.)
-
-The browser talks directly to Base RPC, Lit Chipotle API, and the user's wallet (MetaMask).
+The browser talks directly to Base RPC, the Lit Chipotle API, and the user's wallet (MetaMask).
 
 ## Smart contract
 
 ```
 contracts/
   src/SwapContract.sol    # Swap state machine on Base
-  test/SwapContract.t.sol # 39 Foundry tests
+  script/Deploy.s.sol     # Foundry deploy script
+  test/SwapContract.t.sol # 51 Foundry tests
 ```
 
-State machine: `Created -> Executed | Refunded`
+State machine: `Created -> Executed | Refunded` (unchanged by the two-sided work).
 
 Key functions:
-- `createSwap(...)` records swap intent with all parameters
+- `announceIntent(...)` emits an `IntentAnnounced` order-book event — no storage, no escrow; `msg.sender` authenticates the user
+- `createSwap(...)` records a solver's fill: real `destAmount` (enforced `>= minDestAmount`), the four role addresses, deposit addresses, CID + salt; emits `SwapCreated(swapId, intentId, ...)`
+- `getSwapAddresses(swapId)` returns the four role addresses + the two deposit addresses; `getSwapIntent(swapId)` returns `intentId`, `minDestAmount`, and `salt`
 - `markLegSettled(swapId, isSourceLeg, txHash)` logs each leg's completion
 - `markFeeSettled(swapId, txHash)` logs fee payment separately, so a crash between a leg settling and the fee being paid is recoverable (the action re-sends the fee only if this flag is unset)
 - `markExecuted(swapId)` finalizes (requires both legs settled)
@@ -180,31 +202,34 @@ All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "
 
 ## Features
 
-- **Per-leg settlement** -- each leg logged to contract independently, enabling safe re-execution after partial failure
+- **Two-sided market** -- users announce intents; solvers compete by building swaps, each quoting a `destAmount` at or above the user's floor
+- **On-chain order book** -- a client-side scan of `IntentAnnounced` / `SwapCreated` events; no backend, no indexer (truncated scans are surfaced, never hidden)
+- **Competing quotes** -- the user sees every solver's quote best-rate-first and funds the best; each quote is a distinct swap with its own key, so funding one can never settle another
+- **Four-address model** -- separate role addresses per party per chain, so settle and refund target the correct chain in a real cross-family swap
+- **Per-leg settlement** -- each leg logged to the contract independently, enabling safe re-execution after partial failure
 - **Signed receipts** -- JSON with both tx hashes, amounts, timestamps, signed by the Lit Action's key
-- **Webhooks** -- optional callback URL, POST on state changes
-- **Gas preview** -- estimate total costs across all chains before committing
-- **CID verification** -- recompute CID from template + salt to verify action code matches contract
-- **ERC-20 support** -- token address fields in contract, direct `transfer()` from action wallet
-- **Excess sweep** -- leftover deposits returned to refund address after execution
+- **CID verification** -- recompute CID from template + salt to confirm a swap runs only the audited code (auto-run before the user funds)
+- **ERC-20 support** -- token address fields in the contract, direct `transfer()` from the action wallet
+- **Excess sweep** -- leftover deposits returned to each side's refund address after execution
 
 ## Testing
 
 ```bash
-# Solidity (39 tests)
+# Solidity (51 tests)
 cd contracts && forge test
 
-# Lit Action logic (43 tests, Node 22+)
-node test/engine.test.js          # real runSwap state machine, mock legs (18)
-node test/utxo-math.test.js       # coin selection / fee math (8)
+# Lit Action + browser-core logic (66 tests, Node 22+)
+node test/engine.test.js          # real runSwap state machine, mock legs (22)
+node test/utxo-math.test.js       # coin selection / fee math (14)
 node test/evm-evm-action.test.js  # settlement flow (9)
 node test/evm-btc-action.test.js  # settlement flow (8)
+node test/lib.test.js             # browser shared-core pure helpers (13)
 
 # Assemble + syntax-check all 11 action templates
 node test/_gen.mjs && for f in /tmp/genactions/*.mjs; do node --check "$f"; done
 ```
 
-`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions (including the Zcash ZIP-317 fee math). Most in-sandbox crypto (the BTC/LTC/DOGE/SOL signers) runs only in the Lit runtime and still needs live-testnet verification. Contract tests cover the full per-leg settlement lifecycle.
+`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy, including the four-address settle/refund mapping and the dest-floor assert. `test/lib.test.js` covers the browser shared core (`app/lib/*`) pure helpers: random salt, template dispatch, deposit picking, order-book paging, quote group/sort, CID compare. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions (including the Zcash ZIP-317 fee math). Most in-sandbox crypto (the BTC/LTC/DOGE/SOL signers) runs only in the Lit runtime and still needs live-testnet verification. Contract tests cover the full intent → fill → per-leg settlement lifecycle.
 
 The **Zcash ZIP-243 shim** — the highest-risk hand-rolled crypto — has been verified end-to-end against a local `zcashd` regtest node: the exact shipped `zecLegSrc()` builds and signs a transaction that zcashd's consensus engine accepts and mines (on both a Canopy and a NU6 chain). That harness, the findings, and a one-command reproduction live in `.context/zec-verify/`. Two bugs it surfaced (a stale hardcoded consensus branch id and a sub-ZIP-317 fee) are fixed.
 
@@ -219,14 +244,16 @@ The web app is static HTML + JS with no build step. No Node.js required to run i
 cd contracts
 forge install foundry-rs/forge-std
 forge test
-# forge script script/Deploy.s.sol --rpc-url https://sepolia.base.org --broadcast
+PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url https://sepolia.base.org --broadcast
 
 # Run the web app (any static file server works)
 cd app && python3 -m http.server 8899
-# Open http://localhost:8899
+# User app:   http://localhost:8899/index.html
+# Solver app: http://localhost:8899/solver.html
 ```
 
-Update `CONTRACT_ADDRESS` in `app/swap-engine.js` after deployment.
+After deployment, set `CONTRACT_ADDRESS` (and `CONTRACT_DEPLOY_BLOCK`, so the order-book
+scan starts at deploy rather than genesis) in `app/lib/contract.js` — the script prints both.
 
 **For running tests only** (optional): Node.js 22+ (ESM auto-detection). The engine and UTXO-math tests use only Node built-ins; the older harness-based tests import `ethers`.
 

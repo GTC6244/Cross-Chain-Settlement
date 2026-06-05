@@ -15,7 +15,8 @@
   progressive disclosure. The *trust mechanism* is surfaced, not the plumbing.
 - **Space/industry:** Cross-chain swap / bridge. Peers: Jumper (LI.FI), Across,
   Relay, NEAR Intents, Synapse, THORSwap.
-- **Project type:** Single-page web dApp (`app/index.html`).
+- **Project type:** Two role-scoped web dApps — user (`app/index.html`) and solver
+  (`app/solver.html`) — sharing one design system (`app/settled.css`).
 
 ## Design Thesis
 Bank-grade calm with none of the bank coldness. Light, warm, spacious. The swap is one
@@ -76,12 +77,15 @@ Three voices, clear roles. Sans says "for you," mono says "this is the exact val
 
 ## Layout
 - **Approach:** Hybrid — grid-disciplined inside the swap card, generous editorial air around it.
-- **Hero pattern:** Single centered swap card (~520px max). The 5 tabs (Create / Status /
-  Execute / Gas Preview / Verify CID) collapse into one flow; chains become a From→To
-  selector; deposit addresses, CID, and gas details live behind a "Details" disclosure.
+- **Hero pattern (user app):** centered ~520px column. Flow is Announce → Quotes →
+  Status; chains are a From→To selector; competing solver quotes render best-rate-first
+  with the best highlighted; CID/deposit detail lives behind disclosure.
+- **Solver app:** same tokens at pro density (~960px, `--container-pro`). The order book
+  is warm **ledger rows** (tabular mono amounts, gold accent on the actionable row), not a
+  cold data grid; flow is Order Book → Quote → My Fills.
 - **Settlement progress is a first-class moment:** show the two legs settling one at a
   time, ending in a "receipt signed" payoff. Do not bury it in a status box.
-- **Max content width:** 1080px (page), 520px (swap card).
+- **Max content width:** 520px (user column) · 960px (solver workspace).
 - **Border radius:** sm 8px (inputs, small buttons) · md 12px (cards, alerts) ·
   lg 18px (hero card) · full 999px (pills, chain selectors, status badges, wallet button).
 
@@ -99,3 +103,6 @@ Three voices, clear roles. Sans says "for you," mono says "this is the exact val
 | 2026-06-04 | Light-first (dark = alternate) | "Nothing to hide" reinforces the trustless thesis. User chose this risk. |
 | 2026-06-04 | Fraunces serif for display | Warmth + memorability in a sans/mono-only category. |
 | 2026-06-04 | Mono reserved for technical truth only | Sans = human-facing; mono = exact machine values (addresses, CIDs, hashes). |
+| 2026-06-05 | Split into user + solver apps | /plan-design-review for the two-sided market. Same tokens; solver gets pro density (960px) + ledger rows. |
+| 2026-06-05 | Order book = warm ledger rows, not a data grid | DESIGN.md already reserves mono + tabular-nums for amounts; a disciplined ledger stays on-brand. No zebra/grid chrome. |
+| 2026-06-05 | Deliberate "Fund this quote" (never auto) | Moving real value is always a conscious act; best quote pre-highlighted but the user taps to commit. |

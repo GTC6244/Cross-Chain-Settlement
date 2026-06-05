@@ -40,11 +40,6 @@ pair runs only in the Lit runtime and is not covered by the Node tests.
   one guided swap-card flow with progressive disclosure, per the design vision.
   Reference mockup: `~/.gstack/projects/cross-chain-settlement/designs/swap-app-20260604/finalized.html`.
 
-- **Inputs use 14px font (<16px → iOS zoom-on-focus)**
-  **Priority:** P3
-  Bump form inputs to 16px or add a mobile-specific rule to stop iOS from
-  zooming when a field is focused.
-
 - **Self-host General Sans if a CSP locks font origins**
   **Priority:** P3
   General Sans loads from the Fontshare CDN. If font sources are locked down,
@@ -52,25 +47,9 @@ pair runs only in the Lit runtime and is not covered by the Node tests.
 
 ## Two-Sided Market (RFQ)
 
-Splitting the single UI into a user (intent) interface + a solver (quote) interface.
-Full plan: `docs/plans/two-sided-rfq-plan.md`. ENG + DESIGN reviewed/cleared.
-
-- **Implement the two-sided market (signed-intent + solver-builds-swap)**
-  **Priority:** P2
-  Lane A first: contract `F1` four-address fix (`userRefundSource`/`userReceiveDest`/
-  `solverReceiveSource`/`solverRefundDest`) + stateless `announceIntent` event +
-  `createSwap` gains `intentId`/`minDestAmount` + Foundry tests + audit-the-diff. Then
-  engine 4-address mapping + floor assert (`engine.js`), then split `index.html`
-  (user) and new `solver.html` from a shared `app/lib/*` core. Settlement state machine
-  stays UNCHANGED. Design spec (order book = warm ledger rows, deliberate fund, pro
-  density) is in the plan.
-
-- **F1: four-address model is a latent cross-chain bug (fix even if RFQ slips)**
-  **Priority:** P1
-  `engine.js` uses `refundAddressSource`/`refundAddressDest` on opposite chains in
-  settle vs refund paths. Only safe today because the demo points all four roles at one
-  EVM wallet on EVM↔EVM. A real cross-family swap refunds to the wrong chain → lost
-  funds. Needs the four role-named addresses + a mapping test.
+The two-sided market (signed-intent + solver-builds-swap) shipped on `GTC6244/seattle`.
+Full plan: `docs/plans/two-sided-rfq-plan.md`. Remaining is deployment + live
+verification (see Chain Verification) and the phase-2 items below.
 
 - **Phase-2: competitive price auction**
   **Priority:** P3
@@ -102,5 +81,8 @@ Full plan: `docs/plans/two-sided-rfq-plan.md`. ENG + DESIGN reviewed/cleared.
 
 ## Completed
 
+- **Two-sided market: user + solver apps (signed-intent + solver-builds-swap)** — contract `announceIntent`/`createSwap`, engine 4-address mapping + floor assert, shared `app/lib/*`, `index.html` + `solver.html`, deploy script. **Completed:** 2026-06-05
+- **F1: four-address model (latent cross-chain bug)** — `SwapContract.sol` + `engine.js` + mapping tests. **Completed:** 2026-06-05
+- **Inputs bumped to 16px (no iOS zoom-on-focus)** — `app/settled.css`. **Completed:** 2026-06-05
 - **"Settled" design system + consumer re-skin** — DESIGN.md, app/index.html, CLAUDE.md. **Completed:** 2026-06-04
 - **Custody-model copy corrected to TEE + root-of-trust** — README.md + UI. **Completed:** 2026-06-04
