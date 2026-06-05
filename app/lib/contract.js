@@ -11,24 +11,21 @@
  * inside functions, so this module is importable in Node for unit tests.
  */
 
-export const LIT_API_BASE = 'https://api.chipotle.litprotocol.com';
+export const LIT_API_BASE = 'https://test.chipotle.litprotocol.com';
 
-// Contract deployed on Base Sepolia.
-// TODO: update after deployment (and set CONTRACT_DEPLOY_BLOCK for the log scan).
-export const CONTRACT_ADDRESS = '0x0000000000000000000000000000000000000000';
+// Contract deployed on Base mainnet (chain 8453).
+// Deploy tx: 0xeef34e461b90d5af45f123104137c3bb6dbfb7a22182e42e45ba4c56d9f8f0e6
+export const CONTRACT_ADDRESS = '0xC0a9c217e643DbdF1b6195a18C0802a1231507A1';
 
 // First block to scan for IntentAnnounced/SwapCreated. Set to the contract's
 // deployment block so the order-book scan never walks the whole chain.
-export const CONTRACT_DEPLOY_BLOCK = 0;
+export const CONTRACT_DEPLOY_BLOCK = 46949838;
 
 export const CHAIN_RPC = {
-  'base-sepolia': 'https://sepolia.base.org',
-  'ethereum-sepolia': 'https://rpc.sepolia.org',
-  'arbitrum-sepolia': 'https://sepolia-rollup.arbitrum.io/rpc',
-  'optimism-sepolia': 'https://sepolia.optimism.io',
+  'base': 'https://mainnet.base.org',
 };
 
-export const BASE_RPC = CHAIN_RPC['base-sepolia'];
+export const BASE_RPC = CHAIN_RPC['base'];
 
 export const STATE_NAMES = ['Created', 'Funded', 'Executed', 'Refunded', 'Expired'];
 export const STATE_CLASSES = ['badge-created', 'badge-created', 'badge-executed', 'badge-refunded', 'badge-expired'];

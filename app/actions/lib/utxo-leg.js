@@ -160,7 +160,9 @@ function makeUtxoLeg(ctx, chainId_, role) {
   var cfg = CHAINS[chainId_];
   var isSegwit = cfg.addrType === "p2wpkh";
   var sizes = isSegwit ? SIZES_SEGWIT : SIZES_LEGACY;
-  var pub = btc.utils.pubECDSA(ctx.keyBytes);
+  // @scure/btc-signer 2.x has no utils.pubECDSA; derive the 33-byte compressed
+  // secp256k1 pubkey directly (same call the zec leg uses, proven in-sandbox).
+  var pub = secp256k1.getPublicKey(ctx.keyBytes, true);
   var pay = isSegwit ? btc.p2wpkh(pub, cfg.network) : btc.p2pkh(pub, cfg.network);
 
   async function addInputs(tx, selected) {

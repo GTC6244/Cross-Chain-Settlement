@@ -45,6 +45,10 @@ export function importsSrc(need = {}) {
     lines.push(`import { blake2b } from "${url(PIN.hashes + '/blake2b')}";`);
     lines.push(`import { sha256 } from "${url(PIN.hashes + '/sha256')}";`);
     lines.push(`import { ripemd160 } from "${url(PIN.hashes + '/ripemd160')}";`);
+  }
+  // Both UTXO (p2wpkh/p2pkh pubkey) and Zcash (sighash signing) need secp256k1.
+  // Import it once for either so utxo+zec pairs don't double-import.
+  if (need.utxo || need.zec) {
     lines.push(`import { secp256k1 } from "${url(PIN.curves + '/secp256k1')}";`);
   }
   if (need.sol) {

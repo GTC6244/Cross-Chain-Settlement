@@ -172,15 +172,20 @@ function makeEvmLeg(ctx, chainId_, role) {
 //         feeLeg: "source"|"dest", feeMode: "send-evm"|"retain" }
 async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
   var params = ctx.params;
-  var base = baseOverride || makeBaseWriter(ctx);
 
   // ---- derive mode: return every address this action controls ----
+  // Must short-circuit BEFORE makeBaseWriter: derive callers do not pass a
+  // contractAddress (none exists yet), and makeBaseWriter eagerly constructs an
+  // ethers.Contract from it — which throws on undefined. Derive needs only the
+  // action key + per-leg derivation, never the Base contract.
   if (params.mode === "derive") {
     var out = { evmAddress: ethAddr.fromPrivateKey(ctx.keyBytes) };
     out[sourceLeg.label + "AddressSource"] = await sourceLeg.deriveAddress();
     out[destLeg.label + "AddressDest"] = await destLeg.deriveAddress();
     return out;
   }
+
+  var base = baseOverride || makeBaseWriter(ctx);
 
   // ---- read contract state ----
   var state = await base.read.getSwapState(params.swapId);
