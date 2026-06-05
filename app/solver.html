@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settled — Solver</title>
+  <script>(function(){try{var t=localStorage.getItem('theme')||(window.matchMedia&&matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="settled.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot" aria-hidden="true"></span> Settled <span class="role-tag">Solve</span></h1>
+  <div class="bar-right">
+    <a class="theme-toggle" href="index.html" style="text-decoration:none">← Send</a>
+    <button class="theme-toggle" id="theme-btn" aria-label="Toggle color theme">◐ <span id="theme-label">Dark</span></button>
+    <button id="wallet-btn">Connect Wallet</button>
+  </div>
+</header>
+
+<main class="pro">
+  <div class="hero">
+    <h2>Fill the book. <em>Quote, fund, settle.</em></h2>
+    <p>Browse open intents, quote a price at or above each floor, and inject the destination asset from your own wallet. Each fill mints its own TEE key — you never custody the user's funds.</p>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="book" role="tab">Order Book</button>
+    <button class="tab" data-tab="quote" role="tab">Quote</button>
+    <button class="tab" data-tab="fills" role="tab">My Fills</button>
+  </div>
+
+  <!-- ORDER BOOK -->
+  <div id="panel-book" class="panel active">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div class="section-title" style="margin:0">Open intents</div>
+      <button class="btn btn-ghost" id="refresh-book" style="width:auto;margin:0;padding:8px 14px;min-height:40px">Refresh</button>
+    </div>
+    <div id="book-banner"></div>
+    <div class="ledger" id="book-ledger">
+      <div class="ledger-head">
+        <div>Pair</div><div class="num">You receive</div><div class="num">Floor (min send)</div><div>Expires</div><div></div>
+      </div>
+      <div id="book-rows"></div>
+    </div>
+  </div>
+
+  <!-- QUOTE + CREATE -->
+  <div id="panel-quote" class="panel">
+    <div id="quote-intent" class="deposit-info" style="display:none"></div>
+    <div class="form-section">
+      <div class="form-section-label">Your quote</div>
+      <div class="form-group">
+        <label>Dest amount you'll deliver (≥ the floor)</label>
+        <input type="text" id="quote-dest-amount" placeholder="must be >= the intent floor">
+      </div>
+      <div class="row">
+        <div class="form-group">
+          <label>Your receive address (source chain)</label>
+          <input type="text" id="solver-receive-source" placeholder="where you receive the user's source asset">
+        </div>
+        <div class="form-group">
+          <label>Your refund address (dest chain)</label>
+          <input type="text" id="solver-refund-dest" placeholder="where your dest funds return if it fails">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Lit Chipotle API key (to derive deposit addresses)</label>
+        <input type="password" id="quote-lit-key" placeholder="Your Lit Chipotle API key">
+      </div>
+    </div>
+    <button class="btn btn-primary" id="create-swap-btn" disabled>Select an intent from the order book</button>
+    <div id="quote-output" class="status-box" style="display:none"></div>
+  </div>
+
+  <!-- MY FILLS -->
+  <div id="panel-fills" class="panel">
+    <div class="empty-state">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+      <p>Manage a swap you quoted: once the user funds the source leg, fund the dest leg and settle.</p>
+    </div>
+    <div class="row">
+      <div class="form-group">
+        <label>Swap ID</label>
+        <input type="number" id="fill-swap-id" placeholder="0" min="0">
+      </div>
+      <div class="form-group">
+        <label>Lit API key</label>
+        <input type="password" id="fill-lit-key" placeholder="Your Lit Chipotle API key">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn btn-ghost" id="check-fill-btn" style="flex:1">Check funding</button>
+      <button class="btn btn-ghost" id="fund-dest-btn" style="flex:1">Fund dest leg</button>
+      <button class="btn btn-primary" id="execute-btn" style="flex:1">Execute</button>
+    </div>
+    <div id="fill-legs" class="legs"></div>
+    <div id="fill-output" class="status-box" style="display:none"></div>
+  </div>
+</main>
+
+<script type="module" src="lib/templates.js"></script>
+<script type="module" src="solver-app.js"></script>
+</body>
+</html>
