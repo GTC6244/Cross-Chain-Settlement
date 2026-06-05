@@ -5,8 +5,8 @@
  * signing family, address type, network version bytes, block-explorer API
  * endpoints, dust thresholds, and fee conventions.
  *
- * It is a normal ES module (imported by the action templates and by
- * swap-engine.js in the browser). `chainConfigSrc()` serializes the relevant
+ * It is a normal ES module (imported by the action templates and by the
+ * browser apps via app/lib/templates.js). `chainConfigSrc()` serializes the relevant
  * subset into a code string that gets embedded *inside* the Lit Action, since
  * action code runs in the Lit sandbox and cannot import local files — only
  * jsDelivr ESM URLs.

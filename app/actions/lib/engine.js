@@ -23,7 +23,11 @@
 
 export const CONTRACT_ABI = [
   'function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)',
-  'function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,uint256)',
+  // Returns the four role addresses (userRefundSource, userReceiveDest,
+  // solverReceiveSource, solverRefundDest) then the two deposit addresses then
+  // confirmationBlocks. Positional decode below MUST match this order.
+  'function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,string,string,uint256)',
+  'function getSwapIntent(uint256) view returns (bytes32,uint256,string)',
   'function getSwapLegs(uint256) view returns (bool,bool,string,string)',
   'function getFeeStatus(uint256) view returns (bool,string)',
   'function owner() view returns (address)',
@@ -181,6 +185,7 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
   // ---- read contract state ----
   var state = await base.read.getSwapState(params.swapId);
   var addrs = await base.read.getSwapAddresses(params.swapId);
+  var intent = await base.read.getSwapIntent(params.swapId);
   var legs = await base.read.getSwapLegs(params.swapId);
   var owner = await base.read.owner();
 
@@ -189,11 +194,20 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
   var destAmount = BigInt(state[4].toString());
   var feeBps = BigInt(state[5].toString ? state[5].toString() : state[5]);
   var expirationTs = Number(state[6].toString()) * 1000;
+  var minDestAmount = BigInt(intent[1].toString());
 
-  var refundSource = addrs[2];
-  var refundDest = addrs[3];
-  var depositSource = addrs[4];
-  var depositDest = addrs[5];
+  // FOUR-ADDRESS MODEL (see SwapContract.sol). Decoded positionally from
+  // getSwapAddresses; the role names are explicit so a wrong slot can't quietly
+  // route funds to the wrong chain.
+  //                      success (settle)         failure (refund)
+  //   source asset ────► solverReceiveSource ───  userRefundSource
+  //   dest   asset ────► userReceiveDest     ───  solverRefundDest
+  var userRefundSource = addrs[2];
+  var userReceiveDest = addrs[3];
+  var solverReceiveSource = addrs[4];
+  var solverRefundDest = addrs[5];
+  var depositSource = addrs[6];
+  var depositDest = addrs[7];
 
   var sourceLegSettled = legs[0];
   var destLegSettled = legs[1];
@@ -204,9 +218,9 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
   if (Date.now() > expirationTs) {
     var ref = {};
     var refundFailed = false;
-    try { var r1 = await sourceLeg.drain({ to: refundSource, deposit: depositSource }); if (r1) ref.sourceRefund = r1; }
+    try { var r1 = await sourceLeg.drain({ to: userRefundSource, deposit: depositSource }); if (r1) ref.sourceRefund = r1; }
     catch (e) { ref.sourceRefundNote = String(e.message || e); refundFailed = true; }
-    try { var r2 = await destLeg.drain({ to: refundDest, deposit: depositDest }); if (r2) ref.destRefund = r2; }
+    try { var r2 = await destLeg.drain({ to: solverRefundDest, deposit: depositDest }); if (r2) ref.destRefund = r2; }
     catch (e) { ref.destRefundNote = String(e.message || e); refundFailed = true; }
     if (refundFailed) {
       // Do NOT finalize. markRefunded is terminal (inState Created), so marking
@@ -216,6 +230,14 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
     }
     await base.markRefunded();
     return Object.assign({ status: "refunded" }, ref);
+  }
+
+  // ---- floor check (defense in depth) ----
+  // The contract enforces destAmount >= minDestAmount at createSwap; re-assert
+  // here so a settlement never honors a sub-floor swap even if a bad swap row
+  // somehow exists. Errors out before any value moves.
+  if (destAmount < minDestAmount) {
+    return { status: "error", message: "destAmount below floor (" + destAmount.toString() + " < " + minDestAmount.toString() + ")" };
   }
 
   // ---- balance checks for unsettled legs ----
@@ -242,11 +264,11 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
     resumed: sourceLegSettled || destLegSettled,
   };
 
-  // Settlement cross: source-chain funds pay refundDest; dest-chain funds pay
-  // refundSource (preserves the established repo convention).
+  // Settlement cross: source-chain funds pay the solver (solverReceiveSource);
+  // dest-chain funds pay the user (userReceiveDest).
   async function settleSource() {
     if (!sourceLegSettled) {
-      var txid = await sourceLeg.settle({ to: refundDest, amount: sourceNet, deposit: depositSource });
+      var txid = await sourceLeg.settle({ to: solverReceiveSource, amount: sourceNet, deposit: depositSource });
       result.sourceTxId = txid;
       await base.markLegSettled(true, txid);
       sourceLegSettled = true;
@@ -254,7 +276,7 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
   }
   async function settleDest() {
     if (!destLegSettled) {
-      var txid = await destLeg.settle({ to: refundSource, amount: destNet, deposit: depositDest });
+      var txid = await destLeg.settle({ to: userReceiveDest, amount: destNet, deposit: depositDest });
       result.destTxId = txid;
       await base.markLegSettled(false, txid);
       destLegSettled = true;
@@ -306,8 +328,8 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
     try { var s = await leg.drain({ to: refundAddr, deposit: depositAddr }); if (s) result[leg.role + "Sweep"] = s; }
     catch (e) { result[leg.role + "SweepNote"] = String(e.message || e); }
   }
-  await sweepLeg(sourceLeg, depositSource, refundSource, CFG.feeLeg === "source");
-  await sweepLeg(destLeg, depositDest, refundDest, CFG.feeLeg === "dest");
+  await sweepLeg(sourceLeg, depositSource, userRefundSource, CFG.feeLeg === "source");
+  await sweepLeg(destLeg, depositDest, solverRefundDest, CFG.feeLeg === "dest");
 
   // ---- mark fully executed (contract enforces both legs settled) ----
   await base.markExecuted();

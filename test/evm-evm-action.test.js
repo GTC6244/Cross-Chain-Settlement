@@ -30,7 +30,7 @@ async function main(params) {
   var baseProvider = new ethers.providers.JsonRpcProvider(params.baseRpcUrl);
   var abi = [
     "function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)",
-    "function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,uint256)",
+    "function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,string,string,uint256)",
     "function owner() view returns (address)"
   ];
   var contract = new ethers.Contract(params.contractAddress, abi, baseProvider);
@@ -47,10 +47,12 @@ async function main(params) {
 
   var sourceChain = addrResult[0];
   var destChain = addrResult[1];
-  var refundSource = addrResult[2];
-  var refundDest = addrResult[3];
-  var depositSource = addrResult[4];
-  var depositDest = addrResult[5];
+  var userRefundSource = addrResult[2];
+  var userReceiveDest = addrResult[3];
+  var solverReceiveSource = addrResult[4];
+  var solverRefundDest = addrResult[5];
+  var depositSource = addrResult[6];
+  var depositDest = addrResult[7];
 
   var rpcMap = {
     "base-sepolia": "https://sepolia.base.org",
@@ -72,13 +74,13 @@ async function main(params) {
     var refResults = {};
     var srcProv = new ethers.providers.JsonRpcProvider(sourceRpc);
     var srcBal = await srcProv.getBalance(depositSource);
-    if (srcBal.gt(0) && refundSource) {
+    if (srcBal.gt(0) && userRefundSource) {
       var w = new ethers.Wallet(privateKeyHex, srcProv);
       var gp = await srcProv.getGasPrice();
       var gc = gp.mul(21000);
       var ra = srcBal.sub(gc);
       if (ra.gt(0)) {
-        var tx = await w.sendTransaction({ to: refundSource, value: ra, gasLimit: 21000 });
+        var tx = await w.sendTransaction({ to: userRefundSource, value: ra, gasLimit: 21000 });
         refResults.sourceRefundHash = tx.hash;
       }
     }
@@ -108,9 +110,9 @@ async function main(params) {
   var sourceNet = sourceAmount.sub(fee);
 
   var srcWallet = new ethers.Wallet(privateKeyHex, srcProvider);
-  var txSrc = await srcWallet.sendTransaction({ to: refundDest, value: sourceNet });
+  var txSrc = await srcWallet.sendTransaction({ to: solverReceiveSource, value: sourceNet }); // source asset -> solver
   var dstWallet = new ethers.Wallet(privateKeyHex, dstProvider);
-  var txDst = await dstWallet.sendTransaction({ to: refundSource, value: destAmount });
+  var txDst = await dstWallet.sendTransaction({ to: userReceiveDest, value: destAmount });    // dest asset -> user
 
   var feeResult = {};
   if (fee.gt(0)) {
@@ -147,8 +149,11 @@ function bn(v) {
 }
 
 const depositAddr = '0xDeposit1234567890123456789012345678901234';
-const refundSrc = '0xRefundSrc0000000000000000000000000000001';
-const refundDst = '0xRefundDst0000000000000000000000000000002';
+// Four role addresses (see FOUR-ADDRESS MODEL). EVM<>EVM so all are 0x.
+const userRefundSrc = '0xUserRefundSrc00000000000000000000000001';
+const userReceiveDst = '0xUserReceiveDst0000000000000000000000002';
+const solverReceiveSrc = '0xSolverReceiveSrc000000000000000000000003';
+const solverRefundDst = '0xSolverRefundDst00000000000000000000000004';
 const ownerAddr = '0xOwner0000000000000000000000000000000003';
 
 function makeContractState(overrides = {}) {
@@ -166,8 +171,10 @@ function makeContractState(overrides = {}) {
     swapAddresses: [
       'base-sepolia',
       'ethereum-sepolia',
-      refundSrc,
-      refundDst,
+      userRefundSrc,
+      userReceiveDst,
+      solverReceiveSrc,
+      solverRefundDst,
       depositAddr,
       depositAddr,
       bn(1),
@@ -323,13 +330,13 @@ await test('fee is deducted from source side only', async () => {
   const result = await executeAction(getActionCode(), baseParams, runtime);
   assert.equal(result.status, 'executed');
 
-  // Source send should be 0.99 ETH (1 ETH - 1% fee)
-  const srcSend = sentTxs.find(t => t.to === refundDst && t.rpcUrl === 'https://sepolia.base.org');
+  // Source send (to the solver) should be 0.99 ETH (1 ETH - 1% fee)
+  const srcSend = sentTxs.find(t => t.to === solverReceiveSrc && t.rpcUrl === 'https://sepolia.base.org');
   assert.ok(srcSend);
   assert.equal(srcSend.value, '990000000000000000');
 
-  // Dest send should be full 0.5 ETH (no fee deduction)
-  const dstSend = sentTxs.find(t => t.to === refundSrc && t.rpcUrl === 'https://rpc.sepolia.org');
+  // Dest send (to the user) should be full 0.5 ETH (no fee deduction)
+  const dstSend = sentTxs.find(t => t.to === userReceiveDst && t.rpcUrl === 'https://rpc.sepolia.org');
   assert.ok(dstSend);
   assert.equal(dstSend.value, '500000000000000000');
 });

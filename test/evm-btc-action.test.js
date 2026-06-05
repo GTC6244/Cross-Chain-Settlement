@@ -31,7 +31,7 @@ async function main(params) {
   var baseProvider = new ethers.providers.JsonRpcProvider(params.baseRpcUrl);
   var abi = [
     "function getSwapState(uint256) view returns (uint8,address,address,uint256,uint256,uint16,uint256,string)",
-    "function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,uint256)",
+    "function getSwapAddresses(uint256) view returns (string,string,string,string,string,string,string,string,uint256)",
     "function getSwapLegs(uint256) view returns (bool,bool,string,string)",
     "function owner() view returns (address)",
     "function markLegSettled(uint256,bool,string)",
@@ -51,10 +51,12 @@ async function main(params) {
   var feeBps = stateResult[5];
   var expirationTs = stateResult[6].toNumber() * 1000;
 
-  var refundSource = addrResult[2];
-  var refundDest = addrResult[3];
-  var depositSource = addrResult[4];
-  var depositDest = addrResult[5];
+  var userRefundSource = addrResult[2];
+  var userReceiveDest = addrResult[3];
+  var solverReceiveSource = addrResult[4];
+  var solverRefundDest = addrResult[5];
+  var depositSource = addrResult[6];
+  var depositDest = addrResult[7];
 
   var sourceLegSettled = legResult[0];
   var destLegSettled = legResult[1];
@@ -101,7 +103,7 @@ async function main(params) {
   // Then EVM (source)
   if (!sourceLegSettled) {
     var evmWallet = new ethers.Wallet(privateKeyHex, evmProvider);
-    var txEvm = await evmWallet.sendTransaction({ to: refundDest, value: evmNet });
+    var txEvm = await evmWallet.sendTransaction({ to: solverReceiveSource, value: evmNet }); // source (EVM) asset -> solver
     result.evmTxHash = txEvm.hash;
     await settleContract.markLegSettled(params.swapId, true, txEvm.hash);
     sourceLegSettled = true;
@@ -132,8 +134,11 @@ function bn(v) {
 }
 
 const depositAddr = '0xDeposit1234567890123456789012345678901234';
-const refundSrc = '0xRefundSrc0000000000000000000000000000001';
-const refundDst = 'tb1qRefundBtcAddress';
+// Four role addresses (see FOUR-ADDRESS MODEL). source=EVM (0x), dest=BTC (tb1q).
+const userRefundSrc = '0xUserRefundSrc00000000000000000000000001';   // user, EVM source
+const userReceiveDst = 'tb1qUserReceiveBtc';                          // user, BTC dest
+const solverReceiveSrc = '0xSolverReceiveSrc000000000000000000000003'; // solver, EVM source
+const solverRefundDst = 'tb1qSolverRefundBtc';                       // solver, BTC dest
 const ownerAddr = '0xOwner0000000000000000000000000000000003';
 
 function makeContractState(overrides = {}) {
@@ -147,7 +152,8 @@ function makeContractState(overrides = {}) {
       'QmTestCid',
     ],
     swapAddresses: [
-      'base-sepolia', 'bitcoin-signet', refundSrc, refundDst,
+      'base-sepolia', 'bitcoin-signet',
+      userRefundSrc, userReceiveDst, solverReceiveSrc, solverRefundDst,
       depositAddr, depositAddr, bn(1),
     ],
     swapLegs: [
@@ -279,7 +285,7 @@ await test('fee deducted from EVM (source) side only', async () => {
   assert.equal(result.status, 'executed');
   assert.ok(result.feeHash);
 
-  const evmSend = sentTxs.find(t => t.to === refundDst);
+  const evmSend = sentTxs.find(t => t.to === solverReceiveSrc);
   assert.ok(evmSend);
   // Should be 0.99 ETH (1 ETH - 1%)
   assert.equal(evmSend.value, '990000000000000000');

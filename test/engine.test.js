@@ -26,8 +26,11 @@ function loadRunSwap() {
 }
 const runSwap = loadRunSwap();
 
-const REFUND_SRC = 'refund-source-addr';
-const REFUND_DST = 'refund-dest-addr';
+// Four role addresses (see FOUR-ADDRESS MODEL in engine.js / SwapContract.sol)
+const USER_REFUND_SRC = 'user-refund-source-addr';
+const USER_RECV_DST = 'user-receive-dest-addr';
+const SOLVER_RECV_SRC = 'solver-receive-source-addr';
+const SOLVER_REFUND_DST = 'solver-refund-dest-addr';
 const DEP_SRC = 'deposit-source-addr';
 const DEP_DST = 'deposit-dest-addr';
 const OWNER = '0xOwner';
@@ -47,7 +50,14 @@ function mockBase(o = {}) {
         'QmCid',
       ],
       getSwapAddresses: async () => [
-        'source-chain', 'dest-chain', REFUND_SRC, REFUND_DST, DEP_SRC, DEP_DST, 1,
+        'source-chain', 'dest-chain',
+        USER_REFUND_SRC, USER_RECV_DST, SOLVER_RECV_SRC, SOLVER_REFUND_DST,
+        DEP_SRC, DEP_DST, 1,
+      ],
+      // minDestAmount defaults to '1' so existing tests never trip the floor;
+      // the floor test overrides it.
+      getSwapIntent: async () => [
+        '0xintent', String(o.minDestAmount ?? '1'), o.salt ?? 'salt',
       ],
       getSwapLegs: async () => [
         o.sourceLegSettled ?? false, o.destLegSettled ?? false,
@@ -92,10 +102,10 @@ await test('happy path: settle order source->dest, fee on source paid to owner',
   assert.equal(r.status, 'executed');
   // fee = 1000000 * 100 / 10000 = 10000; sourceNet = 990000
   const srcSettle = src.calls.find(c => c.type === 'settle');
-  assert.equal(srcSettle.to, REFUND_DST);
+  assert.equal(srcSettle.to, SOLVER_RECV_SRC);        // source asset -> solver
   assert.equal(srcSettle.amount, 990000n);
   const dstSettle = dst.calls.find(c => c.type === 'settle');
-  assert.equal(dstSettle.to, REFUND_SRC);
+  assert.equal(dstSettle.to, USER_RECV_DST);          // dest asset -> user
   assert.equal(dstSettle.amount, 500000n);            // no fee on dest
   const fee = src.calls.find(c => c.type === 'sendFee');
   assert.equal(fee.amount, 10000n);
@@ -164,8 +174,8 @@ await test('expired -> drains both legs to refunds, markRefunded', async () => {
   const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'refunded');
   assert.equal(src.calls[0].type, 'drain');
-  assert.equal(src.calls[0].to, REFUND_SRC);
-  assert.equal(dst.calls[0].to, REFUND_DST);
+  assert.equal(src.calls[0].to, USER_REFUND_SRC);   // source refund -> user
+  assert.equal(dst.calls[0].to, SOLVER_REFUND_DST); // dest refund -> solver
   assert.ok(base.calls.some(c => c.type === 'markRefunded'));
 });
 
@@ -289,6 +299,42 @@ await test('markLegSettled failure mid-run throws before markExecuted', async ()
   } catch (e) { threw = true; }
   assert.ok(threw);
   assert.equal(base.calls.filter(c => c.type === 'markExecuted').length, 0);
+});
+
+// F1 guardrail: the four role addresses must map to the right side on BOTH the
+// settle path and the refund path. This is the test that catches a positional
+// decode slip sending funds to the wrong chain.
+await test('F1 mapping: settle pays solver on source + user on dest', async () => {
+  const base = mockBase({ feeBps: 0 });
+  const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'retain' }, src, dst, base);
+  assert.equal(src.calls.find(c => c.type === 'settle').to, SOLVER_RECV_SRC);
+  assert.equal(dst.calls.find(c => c.type === 'settle').to, USER_RECV_DST);
+});
+
+await test('F1 mapping: refund pays user on source + solver on dest', async () => {
+  const base = mockBase({ expirationTs: Math.floor(Date.now() / 1000) - 100 });
+  const src = mockLeg('evm', 'source', { drainTx: 'src-refund' });
+  const dst = mockLeg('btc', 'dest', { drainTx: 'dst-refund' });
+  await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(src.calls.find(c => c.type === 'drain').to, USER_REFUND_SRC);
+  assert.equal(dst.calls.find(c => c.type === 'drain').to, SOLVER_REFUND_DST);
+});
+
+await test('destAmount below floor -> error, no writes, no settle', async () => {
+  const base = mockBase({ destAmount: '400000', minDestAmount: '500000' });
+  const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'error');
+  assert.equal(base.calls.length, 0);
+  assert.equal(src.calls.filter(c => c.type === 'settle').length, 0);
+});
+
+await test('destAmount at floor -> settles normally', async () => {
+  const base = mockBase({ destAmount: '500000', minDestAmount: '500000', feeBps: 0 });
+  const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -4,491 +4,73 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Settled — Cross-Chain Settlement</title>
-  <!-- Set theme before paint to avoid a flash -->
   <script>(function(){try{var t=localStorage.getItem('theme')||(window.matchMedia&&matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();</script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <!-- Fraunces (display) + JetBrains Mono (technical truth) -->
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <!-- General Sans (body/UI) — Fontshare. CSP note: self-host if font origins are locked down; do NOT fall back to Inter. -->
   <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="settled.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
-  <style>
-    /* ===== "Settled" design system — see DESIGN.md =====
-       Original CSS var names are preserved (--bg, --text, --accent, ...) so
-       JS-injected markup keeps working; they're remapped to the new palette. */
-    :root {
-      --canvas:#FAF8F4; --bg:#FAF8F4;
-      --surface:#FFFFFF; --surface-2:#F4F0E9;
-      --border:#ECE7DF;
-      --text:#1A1714; --ink:#1A1714; --text-dim:#7A726A; --muted:#7A726A;
-      --accent:#E0922F; --accent-hover:#B8731F; --accent-deep:#B8731F;
-      --accent-soft:#FBEFD9; --on-accent:#231A08;
-      --success:#2E9E6B; --warning:#B8731F; --error:#D2452F; --info:#3A7BD5;
-      --radius:12px; --radius-sm:8px; --radius-full:999px;
-      --display:'Fraunces',Georgia,serif;
-      --font:'General Sans',-apple-system,BlinkMacSystemFont,sans-serif;
-      --mono:'JetBrains Mono','SF Mono','Fira Code',monospace;
-      --shadow:0 1px 2px rgba(26,23,20,.04), 0 8px 24px rgba(26,23,20,.06);
-      --shadow-lg:0 2px 4px rgba(26,23,20,.05), 0 24px 60px rgba(26,23,20,.10);
-    }
-    [data-theme="dark"] {
-      --canvas:#14110D; --bg:#14110D;
-      --surface:#1E1A15; --surface-2:#262019; --border:#322B22;
-      --text:#F2EDE4; --ink:#F2EDE4; --text-dim:#A99F92; --muted:#A99F92;
-      --accent:#F0A845; --accent-hover:#E0922F; --accent-deep:#E0922F;
-      --accent-soft:#2A2114; --on-accent:#231A08;
-      --success:#3FBF84; --warning:#F0A845; --error:#E8654F;
-      --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.4);
-      --shadow-lg:0 2px 4px rgba(0,0,0,.4), 0 24px 60px rgba(0,0,0,.5);
-    }
-
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-
-    body {
-      font-family: var(--font);
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.55;
-      min-height: 100vh;
-      -webkit-font-smoothing: antialiased;
-      transition: background .4s ease, color .4s ease;
-    }
-
-    header {
-      position: sticky; top: 0; z-index: 20;
-      border-bottom: 1px solid var(--border);
-      padding: 14px 24px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      background: color-mix(in srgb, var(--canvas) 88%, transparent);
-      backdrop-filter: blur(12px);
-    }
-
-    header h1 {
-      font-family: var(--display);
-      font-size: 22px;
-      font-weight: 600;
-      letter-spacing: -0.02em;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    header h1 .dot {
-      width: 14px; height: 14px;
-      border-radius: var(--radius-full);
-      background: var(--accent);
-      box-shadow: 0 0 0 4px var(--accent-soft);
-      flex-shrink: 0;
-    }
-
-    .bar-right { display: flex; align-items: center; gap: 10px; }
-
-    .theme-toggle {
-      font: 500 13px var(--font);
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--text);
-      padding: 9px 14px;
-      border-radius: var(--radius-full);
-      cursor: pointer;
-      min-height: 40px;
-      transition: border-color .2s;
-    }
-    .theme-toggle:hover { border-color: var(--accent); }
-
-    #wallet-btn {
-      background: var(--ink);
-      color: var(--canvas);
-      border: none;
-      padding: 10px 18px;
-      border-radius: var(--radius-full);
-      font: 600 14px var(--font);
-      cursor: pointer;
-      min-height: 40px;
-      transition: transform .15s;
-    }
-    #wallet-btn:hover { transform: translateY(-1px); }
-    #wallet-btn.connected { background: var(--success); color: #fff; }
-
-    main {
-      max-width: 640px;
-      margin: 32px auto;
-      padding: 0 24px;
-    }
-
-    .hero { text-align: center; margin-bottom: 28px; }
-    .hero h2 {
-      font-family: var(--display);
-      font-weight: 600;
-      font-size: clamp(28px, 4.5vw, 38px);
-      line-height: 1.08;
-      letter-spacing: -0.03em;
-      margin-bottom: 12px;
-    }
-    .hero h2 em { font-style: italic; color: var(--accent-deep); }
-    .hero p {
-      font-size: 15px;
-      color: var(--text-dim);
-      max-width: 52ch;
-      margin: 0 auto;
-    }
-
-    .tabs {
-      display: flex;
-      gap: 4px;
-      margin-bottom: 24px;
-      border-bottom: 1px solid var(--border);
-      overflow-x: auto;
-      -webkit-overflow-scrolling: touch;
-      scrollbar-width: none;
-    }
-
-    .tabs::-webkit-scrollbar { display: none; }
-
-    .tab {
-      padding: 12px 16px;
-      background: none;
-      border: none;
-      color: var(--text-dim);
-      font: 500 14px var(--font);
-      cursor: pointer;
-      border-bottom: 2px solid transparent;
-      margin-bottom: -1px;
-      min-height: 44px;
-      transition: color 0.15s;
-      white-space: nowrap;
-    }
-
-    .tab:hover { color: var(--text); }
-
-    .tab:focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: -2px;
-      border-radius: 4px 4px 0 0;
-    }
-
-    .tab.active {
-      color: var(--text);
-      border-bottom-color: var(--accent);
-      font-weight: 600;
-    }
-
-    .panel { display: none; opacity: 0; }
-    .panel.active { display: block; animation: fadeIn 0.15s ease-out forwards; }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(4px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    .form-group { margin-bottom: 16px; }
-
-    label {
-      display: block;
-      font-size: 13px;
-      color: var(--text-dim);
-      margin-bottom: 6px;
-      font-weight: 500;
-    }
-
-    input, select {
-      width: 100%;
-      padding: 11px 12px;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      color: var(--text);
-      font-size: 14px;
-      font-family: var(--mono);
-      min-height: 44px;
-    }
-
-    input:focus, select:focus {
-      outline: none;
-      border-color: var(--accent);
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
-    }
-
-    input:focus-visible, select:focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 1px;
-    }
-
-    .row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-
-    @media (max-width: 480px) {
-      .row { grid-template-columns: 1fr; }
-      .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-      .tab { white-space: nowrap; font-size: 13px; padding: 12px 12px; }
-    }
-
-    .btn {
-      width: 100%;
-      padding: 15px;
-      border: none;
-      border-radius: var(--radius-sm);
-      font: 600 15px var(--font);
-      cursor: pointer;
-      margin-top: 12px;
-      min-height: 52px;
-      transition: transform 0.15s, box-shadow 0.2s, opacity 0.15s;
-    }
-
-    .btn:focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-    }
-
-    .btn-primary {
-      background: var(--accent);
-      color: var(--on-accent);
-      box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 38%, transparent);
-    }
-
-    .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 48%, transparent); }
-    .btn-primary:active { transform: scale(0.99); opacity: 0.95; }
-    .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; transform: none; box-shadow: none; }
-
-    .form-section {
-      margin-bottom: 24px;
-      padding-bottom: 20px;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .form-section:last-of-type {
-      border-bottom: none;
-      margin-bottom: 8px;
-    }
-
-    .form-section-label {
-      font-size: 11px;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      margin-bottom: 12px;
-      font-weight: 600;
-    }
-
-    .status-box {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      padding: 16px;
-      margin-top: 16px;
-      font-family: var(--mono);
-      font-size: 13px;
-      white-space: pre-wrap;
-      word-break: break-all;
-      max-height: 400px;
-      overflow-y: auto;
-    }
-
-    .status-box .line { margin-bottom: 4px; }
-    .status-box .line:empty { margin-bottom: 12px; }
-    .status-box .success { color: var(--success); }
-    .status-box .error { color: var(--error); }
-    .status-box .warn { color: var(--warning); }
-    .status-box .dim { color: var(--text-dim); font-size: 12px; }
-    .status-box .line.success:first-child,
-    .status-box .line.error:first-child {
-      font-weight: 600;
-      font-size: 14px;
-      padding-bottom: 8px;
-      margin-bottom: 8px;
-      border-bottom: 1px solid var(--border);
-    }
-
-    .swap-card {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius-sm);
-      padding: 16px;
-      margin-bottom: 12px;
-    }
-
-    .swap-card h3 {
-      font-size: 14px;
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
-    }
-
-    .swap-card .detail {
-      font-size: 13px;
-      color: var(--text-dim);
-      font-family: var(--mono);
-    }
-
-    .badge {
-      display: inline-block;
-      padding: 3px 9px;
-      border-radius: var(--radius-full);
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-    }
-
-    .badge-created  { background: var(--accent-soft); color: var(--accent-deep); }
-    .badge-executed { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
-    .badge-refunded { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
-    .badge-expired  { background: color-mix(in srgb, var(--error) 14%, transparent); color: var(--error); }
-
-    .section-title {
-      font-size: 13px;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      margin-bottom: 12px;
-    }
-
-    .empty-state {
-      text-align: center;
-      padding: 28px 16px 22px;
-      color: var(--text-dim);
-      font-size: 13px;
-      line-height: 1.6;
-    }
-
-    .empty-state svg {
-      width: 32px;
-      height: 32px;
-      margin-bottom: 12px;
-      opacity: 0.55;
-      stroke: var(--accent);
-    }
-
-    .empty-state p { max-width: 340px; margin: 0 auto; }
-
-    .hint { font-size: 12px; color: var(--text-dim); margin-bottom: 8px; }
-
-    .deposit-info {
-      background: var(--accent-soft);
-      border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
-      border-radius: var(--radius-sm);
-      padding: 12px;
-      margin-top: 12px;
-    }
-
-    .deposit-info p { font-size: 13px; margin-bottom: 6px; }
-
-    .deposit-info .addr {
-      font-family: var(--mono);
-      font-size: 12px;
-      color: var(--accent-deep);
-      word-break: break-all;
-    }
-
-    /* Trust panel — the hero feature, stated plainly */
-    .trust {
-      display: flex; gap: 12px; align-items: flex-start;
-      margin-top: 20px; padding: 14px 16px;
-      border: 1px dashed var(--border);
-      border-radius: var(--radius-sm);
-    }
-    .trust .shield { color: var(--success); flex-shrink: 0; margin-top: 2px; }
-    .trust .t-title { font-weight: 600; font-size: 14px; }
-    .trust .t-sub { font-size: 13px; color: var(--text-dim); }
-
-    @media (prefers-reduced-motion: reduce) {
-      * { transition: none !important; animation: none !important; }
-    }
-  </style>
 </head>
 <body>
 
 <header>
-  <h1>
-    <span class="dot" aria-hidden="true"></span>
-    Settled
-  </h1>
+  <h1><span class="dot" aria-hidden="true"></span> Settled <span class="role-tag">Send</span></h1>
   <div class="bar-right">
-    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle color theme">◐ <span id="theme-label">Dark</span></button>
-    <button id="wallet-btn" onclick="connectWallet()">Connect Wallet</button>
+    <a class="theme-toggle" href="solver.html" style="text-decoration:none">Solver →</a>
+    <button class="theme-toggle" id="theme-btn" aria-label="Toggle color theme">◐ <span id="theme-label">Dark</span></button>
+    <button id="wallet-btn">Connect Wallet</button>
   </div>
 </header>
 
 <main>
   <div class="hero">
     <h2>Move value across chains. <em>No one holds it but math.</em></h2>
-    <p>No bridge, no wrapped tokens. Each swap's signing key is generated inside a hardware-secured TEE, so it can't be seized, frozen, or rugged.</p>
+    <p>Post what you want to swap. Solvers compete to fill it. You pick the best quote and fund only then — nothing is ever escrowed before you choose.</p>
   </div>
 
-  <div class="tabs">
-    <button class="tab active" onclick="showTab('create')">Create</button>
-    <button class="tab" onclick="showTab('status')">Status</button>
-    <button class="tab" onclick="showTab('execute')">Execute</button>
-    <button class="tab" onclick="showTab('preview')">Gas Preview</button>
-    <button class="tab" onclick="showTab('verify')">Verify CID</button>
+  <div class="tabs" role="tablist">
+    <button class="tab active" data-tab="announce" role="tab">1 · Announce</button>
+    <button class="tab" data-tab="quotes" role="tab">2 · Quotes</button>
+    <button class="tab" data-tab="status" role="tab">3 · Status</button>
   </div>
 
-  <!-- CREATE SWAP -->
-  <div id="panel-create" class="panel active">
+  <!-- 1. ANNOUNCE INTENT -->
+  <div id="panel-announce" class="panel active">
     <div class="form-section">
-      <div class="form-section-label">Chains</div>
+      <div class="form-section-label">What you're swapping</div>
       <div class="row">
         <div class="form-group">
-          <label>Source Chain</label>
-          <select id="source-chain">
-            <option value="base-sepolia">Base Sepolia</option>
-            <option value="ethereum-sepolia">Ethereum Sepolia</option>
-            <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
-            <option value="optimism-sepolia">Optimism Sepolia</option>
-            <option value="bitcoin-signet">Bitcoin Signet</option>
-            <option value="litecoin-testnet">Litecoin Testnet</option>
-            <option value="dogecoin-testnet">Dogecoin Testnet</option>
-            <option value="zcash-testnet">Zcash Testnet (transparent)</option>
-            <option value="solana-devnet">Solana Devnet</option>
-          </select>
+          <label>From (source chain)</label>
+          <select id="source-chain"></select>
         </div>
         <div class="form-group">
-          <label>Dest Chain</label>
-          <select id="dest-chain">
-            <option value="ethereum-sepolia">Ethereum Sepolia</option>
-            <option value="base-sepolia">Base Sepolia</option>
-            <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
-            <option value="optimism-sepolia">Optimism Sepolia</option>
-            <option value="bitcoin-signet">Bitcoin Signet</option>
-            <option value="litecoin-testnet">Litecoin Testnet</option>
-            <option value="dogecoin-testnet">Dogecoin Testnet</option>
-            <option value="zcash-testnet">Zcash Testnet (transparent)</option>
-            <option value="solana-devnet">Solana Devnet</option>
-          </select>
+          <label>To (dest chain)</label>
+          <select id="dest-chain"></select>
         </div>
       </div>
-    </div>
-
-    <div class="form-section">
-      <div class="form-section-label">Amounts</div>
       <div class="row">
         <div class="form-group">
-          <label>Source Amount (wei/sat)</label>
+          <label>You send (source, smallest unit)</label>
           <input type="text" id="source-amount" placeholder="e.g. 1000000000000000000 (1 ETH)">
         </div>
-      <div class="form-group">
-        <label>Dest Amount (wei/sat)</label>
-        <input type="text" id="dest-amount" placeholder="e.g. 500000000000000000 (0.5 ETH)">
+        <div class="form-group">
+          <label>You want at least (dest, smallest unit)</label>
+          <input type="text" id="min-dest-amount" placeholder="e.g. 95000000 (your floor)">
+        </div>
       </div>
-    </div>
     </div>
 
     <div class="form-section">
-      <div class="form-section-label">Addresses</div>
+      <div class="form-section-label">Your addresses</div>
       <div class="row">
         <div class="form-group">
-          <label>Refund Address (Source)</label>
-          <input type="text" id="refund-source" placeholder="0x...">
+          <label>Refund address (source chain)</label>
+          <input type="text" id="user-refund-source" placeholder="where your funds return if no fill">
         </div>
         <div class="form-group">
-          <label>Refund Address (Dest)</label>
-          <input type="text" id="refund-dest" placeholder="0x...">
+          <label>Receive address (dest chain)</label>
+          <input type="text" id="user-receive-dest" placeholder="where you receive the swapped asset">
         </div>
       </div>
     </div>
@@ -501,49 +83,23 @@
           <input type="number" id="fee-bps" value="50" min="0" max="10000">
         </div>
         <div class="form-group">
-          <label>Expiration (hours)</label>
+          <label>Expires in (hours)</label>
           <input type="number" id="expiration-hours" value="1" min="0.1" step="0.1">
         </div>
       </div>
       <div class="row">
         <div class="form-group">
-          <label>Swap Type</label>
-          <select id="action-type">
-            <option value="evm-evm">EVM &lt;&gt; EVM</option>
-            <option value="evm-btc">EVM &lt;&gt; Bitcoin</option>
-            <option value="evm-zec">EVM &lt;&gt; Zcash</option>
-            <option value="btc-zec">Bitcoin &lt;&gt; Zcash</option>
-            <option value="btc-ltc">Bitcoin &lt;&gt; Litecoin</option>
-            <option value="btc-doge">Bitcoin &lt;&gt; Dogecoin</option>
-            <option value="evm-sol">EVM &lt;&gt; Solana</option>
-            <option value="btc-sol">Bitcoin &lt;&gt; Solana</option>
-            <option value="zec-sol">Zcash &lt;&gt; Solana</option>
-            <option value="zec-ltc">Zcash &lt;&gt; Litecoin</option>
-            <option value="zec-doge">Zcash &lt;&gt; Dogecoin</option>
-          </select>
+          <label>Source token (optional ERC-20)</label>
+          <input type="text" id="token-source" placeholder="empty = native">
         </div>
         <div class="form-group">
-          <label>Webhook URL (optional)</label>
-          <input type="url" id="webhook-url" placeholder="https://your-server.com/webhook">
+          <label>Dest token (optional ERC-20)</label>
+          <input type="text" id="token-dest" placeholder="empty = native">
         </div>
       </div>
     </div>
 
-    <div class="form-section">
-      <div class="form-section-label">ERC-20 Tokens (optional)</div>
-      <div class="form-group">
-        <label>Source Token Address</label>
-        <input type="text" id="token-source" placeholder="Leave empty for native ETH/BTC">
-      </div>
-    <div class="form-group">
-      <label>Dest Token Address</label>
-      <input type="text" id="token-dest" placeholder="Leave empty for native ETH/BTC">
-    </div>
-    </div>
-
-    <button class="btn btn-primary" id="create-btn" onclick="createSwap()" disabled>
-      Connect wallet to create swap
-    </button>
+    <button class="btn btn-primary" id="announce-btn" disabled>Connect wallet to announce</button>
 
     <div class="trust">
       <span class="shield" aria-hidden="true">
@@ -551,149 +107,42 @@
       </span>
       <div>
         <div class="t-title">No one holds your funds</div>
-        <div class="t-sub">Each swap mints a unique key inside a Trusted Execution Environment. No one can reach it, not even Lit, and a complete root-of-trust system attests to the exact code running. If a leg fails mid-swap, re-running picks up exactly where it left off.</div>
+        <div class="t-sub">Announcing costs nothing and escrows nothing. When you fund a quote, the swap's signing key lives only inside a Trusted Execution Environment — no one, not even Lit, can reach it. If a leg fails mid-swap, re-running picks up where it left off.</div>
       </div>
     </div>
 
-    <div id="create-output" class="status-box" style="display:none"></div>
+    <div id="announce-output" class="status-box" style="display:none"></div>
   </div>
 
-  <!-- CHECK STATUS -->
+  <!-- 2. COMPARE QUOTES -->
+  <div id="panel-quotes" class="panel">
+    <div class="form-group">
+      <label>Intent ID (auto-filled from your last announce)</label>
+      <input type="text" id="quotes-intent-id" placeholder="0x…">
+    </div>
+    <button class="btn btn-ghost" id="load-quotes-btn">Load competing quotes</button>
+    <div id="quotes-banner"></div>
+    <div id="quotes-list" style="margin-top:16px"></div>
+    <div id="quotes-output" class="status-box" style="display:none"></div>
+  </div>
+
+  <!-- 3. STATUS -->
   <div id="panel-status" class="panel">
     <div class="empty-state">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-      <p>Check deposit status and balances for an existing swap on both chains.</p>
+      <p>Track a funded swap as its two legs settle, ending in a signed receipt.</p>
     </div>
     <div class="form-group">
       <label>Swap ID</label>
       <input type="number" id="status-swap-id" placeholder="0" min="0">
     </div>
-    <button class="btn btn-primary" onclick="checkStatus()">Check Status</button>
+    <button class="btn btn-primary" id="status-btn">Check status</button>
+    <div id="status-legs" class="legs"></div>
     <div id="status-output" class="status-box" style="display:none"></div>
-  </div>
-
-  <!-- EXECUTE -->
-  <div id="panel-execute" class="panel">
-    <div class="empty-state">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
-      <p>Trigger a funded swap's Lit Action to settle both legs. Re-run safely if a previous attempt failed mid-swap.</p>
-    </div>
-    <div class="form-group">
-      <label>Swap ID</label>
-      <input type="number" id="execute-swap-id" placeholder="0" min="0">
-    </div>
-    <div class="form-group">
-      <label>Lit API Key</label>
-      <input type="password" id="lit-api-key" placeholder="Your Lit Chipotle API key">
-    </div>
-    <button class="btn btn-primary" onclick="executeSwap()">Execute Swap</button>
-    <div id="execute-output" class="status-box" style="display:none"></div>
-  </div>
-
-  <!-- GAS PREVIEW -->
-  <div id="panel-preview" class="panel">
-    <div class="empty-state">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg>
-      <p>Estimate gas and fee costs across all chains before committing to a swap.</p>
-    </div>
-    <div class="row">
-      <div class="form-group">
-        <label>Source Chain</label>
-        <select id="preview-source-chain">
-          <option value="base-sepolia">Base Sepolia</option>
-          <option value="ethereum-sepolia">Ethereum Sepolia</option>
-          <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Dest Chain</label>
-        <select id="preview-dest-chain">
-          <option value="ethereum-sepolia">Ethereum Sepolia</option>
-          <option value="base-sepolia">Base Sepolia</option>
-          <option value="arbitrum-sepolia">Arbitrum Sepolia</option>
-        </select>
-      </div>
-    </div>
-    <div class="row">
-      <div class="form-group">
-        <label>Source Amount (wei)</label>
-        <input type="text" id="preview-source-amount" placeholder="1000000000000000000">
-      </div>
-      <div class="form-group">
-        <label>Fee (bps)</label>
-        <input type="number" id="preview-fee-bps" value="50">
-      </div>
-    </div>
-    <button class="btn btn-primary" onclick="gasPreview()">Estimate Gas Costs</button>
-    <div id="preview-output" class="status-box" style="display:none"></div>
-  </div>
-
-  <!-- VERIFY CID -->
-  <div id="panel-verify" class="panel">
-    <div class="empty-state">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
-      <p>Verify that a swap's Lit Action code matches the expected template. Recomputes the CID from template + salt and compares to the contract.</p>
-    </div>
-    <div class="form-group">
-      <label>Swap ID</label>
-      <input type="number" id="verify-swap-id" placeholder="0" min="0">
-    </div>
-    <div class="form-group">
-      <label>Salt (from swap creation)</label>
-      <input type="text" id="verify-salt" placeholder="sha256 hex string">
-    </div>
-    <p class="hint">Swap type is detected automatically from the swap's chains.</p>
-    <button class="btn btn-primary" onclick="verifyCid()">Verify CID</button>
-    <div id="verify-output" class="status-box" style="display:none"></div>
   </div>
 </main>
 
-<!-- Expose the audited action-template generators (ESM) on window for the
-     classic swap-engine.js script. Loading these modules does NOT fetch
-     jsDelivr — the jsDelivr imports live only inside the generated action
-     strings, which run in the Lit sandbox. -->
-<script type="module">
-  import { getEvmEvmActionCode } from './actions/evm-evm-action.js';
-  import { getEvmBtcActionCode } from './actions/evm-btc-action.js';
-  import { getEvmZecActionCode } from './actions/evm-zec-action.js';
-  import { getBtcZecActionCode } from './actions/btc-zec-action.js';
-  import { getBtcLtcActionCode } from './actions/btc-ltc-action.js';
-  import { getBtcDogeActionCode } from './actions/btc-doge-action.js';
-  import { getEvmSolActionCode } from './actions/evm-sol-action.js';
-  import { getBtcSolActionCode } from './actions/btc-sol-action.js';
-  import { getZecSolActionCode } from './actions/zec-sol-action.js';
-  import { getZecLtcActionCode } from './actions/zec-ltc-action.js';
-  import { getZecDogeActionCode } from './actions/zec-doge-action.js';
-  window.ActionTemplates = {
-    'evm-evm': getEvmEvmActionCode,
-    'evm-btc': getEvmBtcActionCode,
-    'evm-zec': getEvmZecActionCode,
-    'btc-zec': getBtcZecActionCode,
-    'btc-ltc': getBtcLtcActionCode,
-    'btc-doge': getBtcDogeActionCode,
-    'evm-sol': getEvmSolActionCode,
-    'btc-sol': getBtcSolActionCode,
-    'zec-sol': getZecSolActionCode,
-    'zec-ltc': getZecLtcActionCode,
-    'zec-doge': getZecDogeActionCode,
-  };
-</script>
-<!-- Theme toggle (independent of swap-engine.js) -->
-<script>
-  function toggleTheme() {
-    var r = document.documentElement;
-    var next = r.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
-    r.setAttribute('data-theme', next);
-    var lbl = document.getElementById('theme-label');
-    if (lbl) lbl.textContent = next === 'light' ? 'Dark' : 'Light';
-    try { localStorage.setItem('theme', next); } catch (e) {}
-  }
-  // Sync the toggle label with the theme set before paint
-  (function () {
-    var lbl = document.getElementById('theme-label');
-    if (lbl) lbl.textContent = document.documentElement.getAttribute('data-theme') === 'light' ? 'Dark' : 'Light';
-  })();
-</script>
-<script src="swap-engine.js"></script>
+<script type="module" src="lib/templates.js"></script>
+<script type="module" src="user-app.js"></script>
 </body>
 </html>
