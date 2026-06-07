@@ -13,6 +13,10 @@ import { toggleTheme, initThemeLabel } from './lib/ui.js';
 
 // Human labels for the chain identifiers the contract stores as strings.
 const CHAIN_LABELS = {
+  // mainnet (live)
+  'base': 'Base', 'ethereum': 'Ethereum', 'bitcoin': 'Bitcoin',
+  'litecoin': 'Litecoin', 'dogecoin': 'Dogecoin', 'zcash': 'Zcash', 'solana': 'Solana',
+  // testnets
   'base-sepolia': 'Base Sepolia', 'ethereum-sepolia': 'Ethereum Sepolia',
   'arbitrum-sepolia': 'Arbitrum Sepolia', 'optimism-sepolia': 'Optimism Sepolia',
   'bitcoin-signet': 'Bitcoin Signet', 'litecoin-testnet': 'Litecoin Testnet',
