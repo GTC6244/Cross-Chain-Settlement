@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settled — Explorer</title>
+  <script>(function(){try{var t=localStorage.getItem('theme')||(window.matchMedia&&matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="settled.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+  <style>
+    /* read-only explorer — built on the Settled design system (settled.css) */
+    /* Override the centered, max-width container: this page uses the full screen width. */
+    main { max-width:none; width:100%; margin:24px 0; padding:0 24px; box-sizing:border-box; }
+    main .hero p { max-width:64ch; margin:0; }
+    .explorer-bar { padding:0; }
+    #swaps { overflow-x:auto; border:1px solid var(--border); border-radius:14px; background:var(--surface); }
+    table.swaps-table { width:100%; }
+    table.swaps-table { width:100%; border-collapse:collapse; font-size:.85rem; }
+    table.swaps-table th, table.swaps-table td { padding:10px 14px; text-align:left; white-space:nowrap; border-bottom:1px solid var(--border); }
+    table.swaps-table thead th { position:sticky; top:0; background:var(--surface); z-index:1; font-family:'General Sans',sans-serif; font-weight:600; text-transform:uppercase; letter-spacing:.04em; font-size:.7rem; opacity:.7; }
+    table.swaps-table tbody tr:hover { background:rgba(127,127,127,.06); }
+    table.swaps-table tbody tr:last-child td { border-bottom:none; }
+    table.swaps-table td.num, table.swaps-table td.mono { font-family:'JetBrains Mono',monospace; }
+    table.swaps-table td.num { text-align:right; }
+    table.swaps-table td .sub { display:block; font-size:.72rem; opacity:.55; }
+    table.swaps-table a { color:var(--accent,#5b8def); text-decoration:none; }
+    table.swaps-table a:hover { text-decoration:underline; }
+    .leg-ok { color:#1a9b5a; } .leg-no { opacity:.45; }
+    .swaps-msg { padding:24px; }
+    .explorer-bar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:18px; }
+    #refresh-meta { font-size:.8rem; opacity:.65; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot" aria-hidden="true"></span> Settled <span class="role-tag">Explore</span></h1>
+  <div class="bar-right">
+    <a class="theme-toggle" href="index.html" style="text-decoration:none">Send →</a>
+    <a class="theme-toggle" href="solver.html" style="text-decoration:none">Solve →</a>
+    <button class="theme-toggle" id="theme-btn" aria-label="Toggle color theme">◐ <span id="theme-label">Dark</span></button>
+  </div>
+</header>
+
+<main>
+  <div class="hero">
+    <h2>Every swap, read-only. <em>The contract is the source of truth.</em></h2>
+    <p>A live, wallet-free view of all swaps recorded on the Base-mainnet SwapContract. Reads <code>getSwapState</code> / <code>getSwapAddresses</code> / <code>getSwapLegs</code> for each id.</p>
+  </div>
+
+  <div class="explorer-bar">
+    <button class="btn btn-primary" id="refresh-btn">Refresh</button>
+    <label style="font-size:.85rem;display:flex;align-items:center;gap:6px"><input type="checkbox" id="newest-first" checked> Newest first</label>
+    <span id="refresh-meta"></span>
+  </div>
+
+  <div id="swaps"></div>
+</main>
+
+<script type="module" src="explorer-app.js"></script>
+<script>
+  // theme toggle (mirrors the other apps)
+  (function(){
+    var btn=document.getElementById('theme-btn'),lbl=document.getElementById('theme-label');
+    function sync(){var t=document.documentElement.getAttribute('data-theme');if(lbl)lbl.textContent=t==='dark'?'Light':'Dark';}
+    sync();
+    if(btn)btn.addEventListener('click',function(){var t=document.documentElement.getAttribute('data-theme')==='dark'?'light':'dark';document.documentElement.setAttribute('data-theme',t);try{localStorage.setItem('theme',t);}catch(e){}sync();});
+  })();
+</script>
+</body>
+</html>
