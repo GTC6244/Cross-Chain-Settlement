@@ -250,6 +250,7 @@ PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url https://sepolia.bas
 cd app && python3 -m http.server 8899
 # User app:   http://localhost:8899/index.html
 # Solver app: http://localhost:8899/solver.html
+# Explorer:   http://localhost:8899/explorer.html   (read-only — every swap's full on-chain record)
 ```
 
 After deployment, set `CONTRACT_ADDRESS` (and `CONTRACT_DEPLOY_BLOCK`, so the order-book

@@ -226,6 +226,40 @@ input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); ou
 .leg .leg-tx { font-family: var(--mono); font-size: 12px; color: var(--text-dim); margin-left: auto; }
 @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
 
+/* explorer ---------------------------------------------------------------- */
+/* Read-only swaps dashboard. Reuses the ledger chrome at its own column rhythm:
+   id · pair · state · you send · they receive · fee. */
+.explore-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.explore-bar .meta { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--text-dim); }
+.explore-bar .meta .k { color: var(--text); font-weight: 600; }
+.explore-bar .meta .addr { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.ledger.explore .ledger-head, .ledger.explore .ledger-row {
+  grid-template-columns: 0.5fr 1.3fr 0.9fr 1fr 1fr 0.6fr;
+}
+.ledger.explore .ledger-row .id { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.ledger.explore .ledger-row .legpips { display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: middle; }
+.ledger.explore .ledger-row .legpips i { width: 7px; height: 7px; border-radius: 50%; background: var(--border); display: inline-block; }
+.ledger.explore .ledger-row .legpips i.on { background: var(--success); }
+
+/* per-swap detail (expands under a clicked row) */
+.swap-detail { background: var(--surface-2); border: 1px solid var(--border); border-top: none; padding: 18px 16px; }
+.swap-detail .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 24px; }
+.swap-detail .field { min-width: 0; }
+.swap-detail .field .label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); font-weight: 600; margin-bottom: 3px; }
+.swap-detail .field .val { font-size: 13px; word-break: break-all; }
+.swap-detail .field .val.mono { font-family: var(--mono); font-size: 12px; }
+.swap-detail .field .val.muted { color: var(--text-dim); }
+.swap-detail .detail-section { grid-column: 1 / -1; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--text-dim); font-weight: 600; border-top: 1px solid var(--border); padding-top: 12px; margin-top: 2px; }
+.swap-detail .detail-section:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+
+@media (max-width: 640px) {
+  .ledger.explore .ledger-row { grid-template-columns: auto 1fr; }
+  .ledger.explore .ledger-row .id { grid-column: 1; }
+  .ledger.explore .ledger-row .pair { grid-column: 2; }
+  .ledger.explore .ledger-row .num, .ledger.explore .ledger-row .state-cell { grid-column: 1 / -1; }
+  .swap-detail .grid { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 640px) {
   /* D1/D2 mobile: ledger + quotes collapse to stacked cards, never a scrolling table */
   .ledger-head { display: none; }

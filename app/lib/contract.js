@@ -45,6 +45,7 @@ export const CONTRACT_ABI = [
   'function getSwapAddresses(uint256 swapId) view returns (string sourceChain, string destChain, string userRefundSource, string userReceiveDest, string solverReceiveSource, string solverRefundDest, string depositAddressSource, string depositAddressDest, uint256 confirmationBlocks)',
   'function getSwapIntent(uint256 swapId) view returns (bytes32 intentId, uint256 minDestAmount, string salt)',
   'function getSwapLegs(uint256 swapId) view returns (bool sourceLegSettled, bool destLegSettled, string sourceLegTxHash, string destLegTxHash)',
+  'function getFeeStatus(uint256 swapId) view returns (bool feeSettled, string feeTxHash)',
   'function getSwapTokens(uint256 swapId) view returns (address tokenAddressSource, address tokenAddressDest)',
   'function swapCount() view returns (uint256)',
   'function owner() view returns (address)',
@@ -69,11 +70,12 @@ export function writeContract(signer) {
  */
 export async function readSwap(swapId) {
   const c = readContract();
-  const [state, addrs, intent, legs, tokens] = await Promise.all([
+  const [state, addrs, intent, legs, fee, tokens] = await Promise.all([
     c.getSwapState(swapId),
     c.getSwapAddresses(swapId),
     c.getSwapIntent(swapId),
     c.getSwapLegs(swapId),
+    c.getFeeStatus(swapId),
     c.getSwapTokens(swapId),
   ]);
   return {
@@ -103,6 +105,8 @@ export async function readSwap(swapId) {
     destLegSettled: legs[1],
     sourceLegTxHash: legs[2],
     destLegTxHash: legs[3],
+    feeSettled: fee[0],
+    feeTxHash: fee[1],
     tokenAddressSource: tokens[0],
     tokenAddressDest: tokens[1],
   };
