@@ -49,6 +49,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - "No one holds your funds" trust panel and a hero headline on the Create tab,
   stating the TEE custody model in plain language.
 - Design-system rule in `CLAUDE.md` (read `DESIGN.md` before any UI change).
+- Read-only **Swaps Explorer** (`app/explorer.html`): a third view that lists every
+  swap the contract has recorded and expands each row to its full on-chain record —
+  state, the four role addresses, both deposit addresses, per-leg and fee settlement
+  (with tx hashes), the Lit Action CID/salt, intent linkage, and token addresses.
+  No wallet and no writes; "Jump to #" loads any swap by id beyond the recent window.
+  Cross-linked from the user and solver apps. Adds a `getFeeStatus` read path so
+  fee-settlement status is visible (`app/lib/contract.js`).
 
 ### Changed
 - The Lit Action now settles **one step per invocation** (settle a leg, pay the
