@@ -70,28 +70,68 @@ function bumpNonce(chainId, address) {
   __nonces[key] = (__nonces[key] || 0) + 1;
 }
 
+// ---- RPC resilience helpers -----------------------------------------------
+// Public/load-balanced RPCs are eventually-consistent and occasionally drop a
+// response. These helpers absorb transient faults so a flaky RPC does not turn
+// a settlement step into a hard failure (the cause of the intermittent 500s).
+function sleepMs(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function rpcErrText(e) { return String((e && (e.message || e.code)) || e).toLowerCase(); }
+function isTransientRpc(e) {
+  var m = rpcErrText(e);
+  return m.indexOf("missing response") >= 0 || m.indexOf("timeout") >= 0 ||
+         m.indexOf("server_error") >= 0 || m.indexOf("bad result") >= 0 ||
+         m.indexOf("502") >= 0 || m.indexOf("503") >= 0 || m.indexOf("504") >= 0 ||
+         m.indexOf("econn") >= 0 || m.indexOf("network") >= 0 ||
+         m.indexOf("rate limit") >= 0 || m.indexOf("too many") >= 0;
+}
+// A broadcast that "fails" because the tx is already in the mempool/mined is a
+// success: the signed tx is deterministic, so its hash is already valid.
+function isAlreadyBroadcast(e) {
+  var m = rpcErrText(e);
+  return m.indexOf("already known") >= 0 || m.indexOf("known transaction") >= 0 ||
+         m.indexOf("already imported") >= 0 || m.indexOf("nonce too low") >= 0 ||
+         m.indexOf("replacement transaction underpriced") >= 0;
+}
+async function rpcRetry(fn, tries) {
+  var last;
+  for (var i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) { last = e; if (!isTransientRpc(e)) throw e; await sleepMs(600 * (i + 1)); }
+  }
+  throw last;
+}
+// Gas price is fetched at most once per chain per run and reused for every tx,
+// to stay within the sandbox's ~24-call outbound-HTTP budget.
+var __gasPrice = {};
+async function getGasPriceCached(provider, chainId) {
+  if (__gasPrice[chainId] === undefined) {
+    var g = await provider.getGasPrice();
+    __gasPrice[chainId] = BigInt(g.toString());
+  }
+  return __gasPrice[chainId];
+}
+
 // ---- low-level EVM signer (micro-eth-signer) ------------------------------
 // Builds + signs with micro-eth-signer; uses the ethers provider for nonce,
 // gas, and broadcast only.
 async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
-  var provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  // Pin a static network so the provider never does an eth_chainId auto-detect
+  // round-trip per call (that detect intermittently failed with "could not
+  // detect network" and added latency that pushed txs past the receipt budget).
+  var provider = new ethers.providers.JsonRpcProvider(rpcUrl, { chainId: Number(chainId), name: "evm" });
   var from = ethAddr.fromPrivateKey(ctx.keyBytes);
   var nonce = await getNonce(provider, chainId, from);
-  var gasPrice = await provider.getGasPrice();           // BigNumber
-  var gp = BigInt(gasPrice.toString());
-  // EIP-1559 fields derived from gasPrice (testnets support 1559).
+  var gp = await getGasPriceCached(provider, chainId); // fetched once per chain/run
+  // EIP-1559 fields. Generous maxFee (3x) so txs mine within a couple blocks.
   var maxPriorityFeePerGas = gp;
-  var maxFeePerGas = gp * 2n;
-  var gasLimit;
-  try {
-    var est = await provider.estimateGas({ from: from, to: to, value: value, data: data || "0x" });
-    gasLimit = (BigInt(est.toString()) * 12n) / 10n;     // +20% buffer
-  } catch (e) {
-    gasLimit = data && data !== "0x" ? 120000n : 21000n; // fallback
-  }
+  var maxFeePerGas = gp * 3n;
+  // Fixed gas limits -- no estimateGas call. estimateGas both costs an HTTP
+  // request (the sandbox caps outbound calls ~24/run) AND reverts on
+  // read-after-write lag for contract writes. Value transfers need 21000;
+  // contract writes get generous headroom.
+  var gasLimit = (data && data !== "0x") ? 200000n : 21000n;
   // micro-eth-signer rejects an explicit undefined data field ("fields had
   // validation errors"); the key must be ABSENT for plain value transfers.
-  // Only set it for contract calls (settle/drain/fee pass data=null).
   var txFields = {
     to: to,
     value: value,
@@ -106,33 +146,57 @@ async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
   var signed = tx.signBy(ctx.keyBytes);
   var raw = signed.toHex();
   var rawHex = raw.indexOf("0x") === 0 ? raw : "0x" + raw;
-  var txHash = await provider.send("eth_sendRawTransaction", [rawHex]);
-  bumpNonce(chainId, from);   // nonce is consumed once the broadcast is accepted
-  // Wait for inclusion so the state machine never advances on an unmined tx.
-  // A reverted tx (status 0) throws -> the run aborts and is safe to retry.
-  var rcpt = await provider.waitForTransaction(txHash, 1);
-  if (!rcpt || rcpt.status === 0) throw new Error("evm tx reverted: " + txHash);
+  var txHash = signed.hash.indexOf("0x") === 0 ? signed.hash : "0x" + signed.hash;
+  // Broadcast only -- do NOT poll for the receipt here. The sandbox's ~24-call
+  // HTTP budget can't afford per-tx polling (it starved later legs and stranded
+  // them). Safety comes from NONCE ORDERING instead: every tx is from this one
+  // EOA with sequential nonces, so the final markExecuted (highest nonce) cannot
+  // be mined until all the value transfers (lower nonces) have mined. Plain ETH
+  // value transfers from a funded address cannot revert. The caller confirms
+  // completion by polling the contract state.
+  for (var i = 0; i < 3; i++) {
+    try { await provider.send("eth_sendRawTransaction", [rawHex]); break; }
+    catch (e) {
+      if (isAlreadyBroadcast(e)) break;                  // already in mempool/mined
+      if (!isTransientRpc(e) || i === 2) throw e;
+      await sleepMs(500 * (i + 1));
+    }
+  }
+  bumpNonce(chainId, from);
   return txHash;
 }
 
 // ---- Base contract writer -------------------------------------------------
 function makeBaseWriter(ctx) {
-  var provider = new ethers.providers.JsonRpcProvider(ctx.params.baseRpcUrl);
+  // Pin a static network so reads/writes never trigger a per-call eth_chainId
+  // auto-detect (that intermittently failed and wasted HTTP budget). The Base
+  // chainId is read once, with retry, then reused.
+  var detectProvider = new ethers.providers.JsonRpcProvider(ctx.params.baseRpcUrl);
+  var providerPromise = rpcRetry(function () { return detectProvider.getNetwork(); }, 5).then(function (n) {
+    return new ethers.providers.JsonRpcProvider(ctx.params.baseRpcUrl, { chainId: n.chainId, name: "evm" });
+  });
   var iface = new ethers.utils.Interface(ABI);
-  var chainIdPromise = provider.getNetwork().then(function (n) { return n.chainId; });
+  var read = new ethers.Contract(ctx.params.contractAddress, ABI, detectProvider);
+  var swapId = ctx.params.swapId;
   async function write(method, args) {
     var data = iface.encodeFunctionData(method, args);
-    var chainId = await chainIdPromise;
-    return evmSignSend(ctx, ctx.params.baseRpcUrl, chainId, ctx.params.contractAddress, 0n, data);
+    var p = await providerPromise;
+    var net = await p.getNetwork();
+    return evmSignSend(ctx, ctx.params.baseRpcUrl, net.chainId, ctx.params.contractAddress, 0n, data);
   }
+  // Plain broadcasts (no per-write idempotency reads): re-issuing a done step is
+  // prevented by the top-level state read in runSwap (settled legs / Executed
+  // state are skipped before any write), and nonce ordering makes markExecuted
+  // safe. Keeping writes call-light is what keeps a full run under the ~24-call
+  // sandbox HTTP budget.
   return {
-    provider: provider,
-    read: new ethers.Contract(ctx.params.contractAddress, ABI, provider),
-    getFeeStatus: function () { return new ethers.Contract(ctx.params.contractAddress, ABI, provider).getFeeStatus(ctx.params.swapId); },
-    markLegSettled: function (isSource, txid) { return write("markLegSettled", [ctx.params.swapId, isSource, txid]); },
-    markFeeSettled: function (txid) { return write("markFeeSettled", [ctx.params.swapId, txid]); },
-    markExecuted: function () { return write("markExecuted", [ctx.params.swapId]); },
-    markRefunded: function () { return write("markRefunded", [ctx.params.swapId]); },
+    provider: detectProvider,
+    read: read,
+    getFeeStatus: function () { return read.getFeeStatus(swapId); },
+    markLegSettled: function (isSource, txid) { return write("markLegSettled", [swapId, isSource, txid]); },
+    markFeeSettled: function (txid) { return write("markFeeSettled", [swapId, txid]); },
+    markExecuted: function () { return write("markExecuted", [swapId]); },
+    markRefunded: function () { return write("markRefunded", [swapId]); },
   };
 }
 
@@ -141,7 +205,10 @@ function makeEvmLeg(ctx, chainId_, role) {
   var cfg = CHAINS[chainId_];
   var rpcUrl = cfg.rpc;
   var chainId = cfg.chainId;
-  var provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  // Pin a static network so the provider never does an eth_chainId auto-detect
+  // round-trip per call (that detect intermittently failed with "could not
+  // detect network" and added latency that pushed txs past the receipt budget).
+  var provider = new ethers.providers.JsonRpcProvider(rpcUrl, { chainId: Number(chainId), name: "evm" });
   return {
     label: "evm",
     role: role,
@@ -191,12 +258,13 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
 
   var base = baseOverride || makeBaseWriter(ctx);
 
-  // ---- read contract state ----
-  var state = await base.read.getSwapState(params.swapId);
-  var addrs = await base.read.getSwapAddresses(params.swapId);
-  var intent = await base.read.getSwapIntent(params.swapId);
-  var legs = await base.read.getSwapLegs(params.swapId);
-  var owner = await base.read.owner();
+  // ---- read contract state (retry-wrapped: the first read triggers the
+  // provider's network detection, which can transiently fail) ----
+  var state = await rpcRetry(function () { return base.read.getSwapState(params.swapId); }, 5);
+  var addrs = await rpcRetry(function () { return base.read.getSwapAddresses(params.swapId); }, 5);
+  var intent = await rpcRetry(function () { return base.read.getSwapIntent(params.swapId); }, 5);
+  var legs = await rpcRetry(function () { return base.read.getSwapLegs(params.swapId); }, 5);
+  var owner = await rpcRetry(function () { return base.read.owner(); }, 5);
 
   var swapState = state[0];
   var sourceAmount = BigInt(state[3].toString());

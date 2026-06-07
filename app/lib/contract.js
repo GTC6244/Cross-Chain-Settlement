@@ -22,7 +22,7 @@ export const CONTRACT_ADDRESS = '0xC0a9c217e643DbdF1b6195a18C0802a1231507A1';
 export const CONTRACT_DEPLOY_BLOCK = 46949838;
 
 export const CHAIN_RPC = {
-  'base': 'https://mainnet.base.org',
+  'base': 'https://base-rpc.publicnode.com',
 };
 
 export const BASE_RPC = CHAIN_RPC['base'];

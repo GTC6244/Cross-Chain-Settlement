@@ -18,7 +18,7 @@
 
 export const CHAINS = {
   // ---- EVM (secp256k1, signed with micro-eth-signer) --------------------
-  'base':              { family: 'evm', rpc: 'https://mainnet.base.org',            chainId: 8453 },
+  'base':              { family: 'evm', rpc: 'https://base-rpc.publicnode.com',     chainId: 8453 },
   'base-sepolia':      { family: 'evm', rpc: 'https://sepolia.base.org',            chainId: 84532 },
   'ethereum-sepolia':  { family: 'evm', rpc: 'https://rpc.sepolia.org',             chainId: 11155111 },
   'arbitrum-sepolia':  { family: 'evm', rpc: 'https://sepolia-rollup.arbitrum.io/rpc', chainId: 421614 },
