@@ -35,14 +35,27 @@ const DEP_SRC = 'deposit-source-addr';
 const DEP_DST = 'deposit-dest-addr';
 const OWNER = '0xOwner';
 
+// Stateful mock: markLegSettled/markFeeSettled/markExecuted mutate internal
+// state so reads reflect prior writes ACROSS invocations. Required now that
+// runSwap does one step per call (see runToCompletion) — the engine reads the
+// on-chain flags at the top of each run to decide the next step.
 function mockBase(o = {}) {
   const calls = [];
   const future = Math.floor(Date.now() / 1000) + 3600;
+  const st = {
+    state: o.state ?? 0,
+    sourceLegSettled: o.sourceLegSettled ?? false,
+    destLegSettled: o.destLegSettled ?? false,
+    sourceLegTx: o.sourceLegTx ?? '',
+    destLegTx: o.destLegTx ?? '',
+    feeSettled: o.feeSettled ?? false,
+    feeTxHash: o.feeTxHash ?? '',
+  };
   return {
     calls,
     read: {
       getSwapState: async () => [
-        o.state ?? 0, '0xcreator', '0xlit',
+        st.state, '0xcreator', '0xlit',
         String(o.sourceAmount ?? '1000000'),
         String(o.destAmount ?? '500000'),
         o.feeBps ?? 100,
@@ -60,16 +73,19 @@ function mockBase(o = {}) {
         '0xintent', String(o.minDestAmount ?? '1'), o.salt ?? 'salt',
       ],
       getSwapLegs: async () => [
-        o.sourceLegSettled ?? false, o.destLegSettled ?? false,
-        o.sourceLegTx ?? '', o.destLegTx ?? '',
+        st.sourceLegSettled, st.destLegSettled, st.sourceLegTx, st.destLegTx,
       ],
       owner: async () => OWNER,
     },
-    getFeeStatus: async () => [o.feeSettled ?? false, o.feeTxHash ?? ''],
-    markLegSettled: async (isSource, txid) => { calls.push({ type: 'markLegSettled', isSource, txid }); },
-    markFeeSettled: async (txid) => { calls.push({ type: 'markFeeSettled', txid }); },
-    markExecuted: async () => { calls.push({ type: 'markExecuted' }); },
-    markRefunded: async () => { calls.push({ type: 'markRefunded' }); },
+    getFeeStatus: async () => [st.feeSettled, st.feeTxHash],
+    markLegSettled: async (isSource, txid) => {
+      calls.push({ type: 'markLegSettled', isSource, txid });
+      if (isSource) { st.sourceLegSettled = true; st.sourceLegTx = txid; }
+      else { st.destLegSettled = true; st.destLegTx = txid; }
+    },
+    markFeeSettled: async (txid) => { calls.push({ type: 'markFeeSettled', txid }); st.feeSettled = true; st.feeTxHash = txid; },
+    markExecuted: async () => { calls.push({ type: 'markExecuted' }); st.state = 2; },
+    markRefunded: async () => { calls.push({ type: 'markRefunded' }); st.state = 3; },
   };
 }
 
@@ -87,6 +103,19 @@ function mockLeg(label, role, opts = {}) {
 
 const ctx = { keyBytes: new Uint8Array(32), params: { mode: 'execute', swapId: 0 } };
 
+// runSwap now performs ONE settlement step per call and returns "in_progress"
+// until the swap is finalized (the HTTP-frugal, one-step-per-invocation model).
+// This drives it to a terminal status the way a real caller does, returning the
+// final result. Throws propagate (used by the failure tests).
+async function runToCompletion(ctx, cfg, src, dst, base) {
+  let r, guard = 0;
+  do {
+    r = await runSwap(ctx, cfg, src, dst, base);
+    if (++guard > 12) throw new Error('runToCompletion exceeded step budget');
+  } while (r && r.status === 'in_progress');
+  return r;
+}
+
 let passed = 0, failed = 0;
 async function test(name, fn) {
   try { await fn(); console.log(`  PASS  ${name}`); passed++; }
@@ -98,7 +127,7 @@ console.log('Engine (runSwap) Tests\n');
 await test('happy path: settle order source->dest, fee on source paid to owner', async () => {
   const base = mockBase();
   const src = mockLeg('evm', 'source'), dst = mockLeg('eth', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'executed');
   // fee = 1000000 * 100 / 10000 = 10000; sourceNet = 990000
   const srcSettle = src.calls.find(c => c.type === 'settle');
@@ -121,7 +150,7 @@ await test('happy path: settle order source->dest, fee on source paid to owner',
 await test('settle order dest->source is honored', async () => {
   const base = mockBase();
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  await runSwap(ctx, { settleOrder: ['dest', 'source'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  await runToCompletion(ctx, { settleOrder: ['dest', 'source'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   const ml = base.calls.filter(c => c.type === 'markLegSettled');
   assert.equal(ml[0].isSource, false); // dest settled first
   assert.equal(ml[1].isSource, true);
@@ -130,10 +159,9 @@ await test('settle order dest->source is honored', async () => {
 await test('resume: source already settled -> only dest settles', async () => {
   const base = mockBase({ sourceLegSettled: true, sourceLegTx: 'prior-src-tx' });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
-  assert.equal(r.resumed, true);
-  assert.equal(r.sourceSkipped, true);
-  assert.equal(r.sourceTxId, 'prior-src-tx');
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
+  assert.equal(r.sourceTxId, 'prior-src-tx');   // carried from the on-chain leg record
   assert.equal(src.calls.filter(c => c.type === 'settle').length, 0);
   assert.equal(dst.calls.filter(c => c.type === 'settle').length, 1);
 });
@@ -141,19 +169,20 @@ await test('resume: source already settled -> only dest settles', async () => {
 await test('resume: dest already settled -> only source settles', async () => {
   const base = mockBase({ destLegSettled: true, destLegTx: 'prior-dst-tx' });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['dest', 'source'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
-  assert.equal(r.destSkipped, true);
-  assert.equal(r.destTxId, 'prior-dst-tx');
+  const r = await runToCompletion(ctx, { settleOrder: ['dest', 'source'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
+  assert.equal(r.destTxId, 'prior-dst-tx');     // carried from the on-chain leg record
   assert.equal(dst.calls.filter(c => c.type === 'settle').length, 0);
   assert.equal(src.calls.filter(c => c.type === 'settle').length, 1);
 });
 
 await test('both legs settled -> only markExecuted', async () => {
-  const base = mockBase({ sourceLegSettled: true, sourceLegTx: 'a', destLegSettled: true, destLegTx: 'b' });
+  const base = mockBase({ sourceLegSettled: true, sourceLegTx: 'a', destLegSettled: true, destLegTx: 'b', feeSettled: true, feeTxHash: 'f' });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
-  assert.equal(r.sourceSkipped, true);
-  assert.equal(r.destSkipped, true);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
+  assert.equal(src.calls.filter(c => c.type === 'settle').length, 0);
+  assert.equal(dst.calls.filter(c => c.type === 'settle').length, 0);
   assert.ok(base.calls.some(c => c.type === 'markExecuted'));
   assert.equal(base.calls.filter(c => c.type === 'markLegSettled').length, 0);
 });
@@ -161,7 +190,7 @@ await test('both legs settled -> only markExecuted', async () => {
 await test('insufficient source funds -> insufficient_funds', async () => {
   const base = mockBase({ sourceAmount: '1000000' });
   const src = mockLeg('evm', 'source', { balance: '10' }), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'insufficient_funds');
   assert.equal(r.leg, 'source');
   assert.equal(base.calls.length, 0);
@@ -171,7 +200,7 @@ await test('expired -> drains both legs to refunds, markRefunded', async () => {
   const base = mockBase({ expirationTs: Math.floor(Date.now() / 1000) - 100 });
   const src = mockLeg('evm', 'source', { drainTx: 'src-refund' });
   const dst = mockLeg('btc', 'dest', { drainTx: 'dst-refund' });
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'refunded');
   assert.equal(src.calls[0].type, 'drain');
   assert.equal(src.calls[0].to, USER_REFUND_SRC);   // source refund -> user
@@ -184,7 +213,7 @@ await test('fee retain (no EVM leg): no sendFee, fee leg not swept, other leg sw
   // btc-zec style: feeLeg dest, retain. dst should NOT be drained (sweep skipped); src should be.
   const src = mockLeg('btc', 'source', { drainTx: 'src-sweep' });
   const dst = mockLeg('zec', 'dest', { drainTx: 'dst-sweep' });
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'dest', feeMode: 'retain' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'dest', feeMode: 'retain' }, src, dst, base);
   assert.equal(r.status, 'executed');
   assert.equal(src.calls.filter(c => c.type === 'sendFee').length, 0);
   assert.equal(dst.calls.filter(c => c.type === 'sendFee').length, 0);
@@ -211,7 +240,7 @@ await test('insufficient DEST funds -> insufficient_funds leg=dest', async () =>
   const base = mockBase({ destAmount: '500000' });
   const src = mockLeg('evm', 'source', { balance: '1000000000' });
   const dst = mockLeg('btc', 'dest', { balance: '10' });
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'insufficient_funds');
   assert.equal(r.leg, 'dest');
   assert.equal(base.calls.length, 0);
@@ -220,7 +249,7 @@ await test('insufficient DEST funds -> insufficient_funds leg=dest', async () =>
 await test('swap not in Created state -> error, no writes', async () => {
   const base = mockBase({ state: 2 });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'error');
   assert.equal(base.calls.length, 0);
 });
@@ -228,7 +257,7 @@ await test('swap not in Created state -> error, no writes', async () => {
 await test('feeBps=0 -> no fee sent, net == gross, no feeRetained', async () => {
   const base = mockBase({ feeBps: 0 });
   const src = mockLeg('btc', 'source'), dst = mockLeg('zec', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'retain' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'retain' }, src, dst, base);
   assert.equal(r.status, 'executed');
   assert.equal(src.calls.find(c => c.type === 'settle').amount, 1000000n); // full gross
   assert.equal(src.calls.filter(c => c.type === 'sendFee').length, 0);
@@ -239,7 +268,7 @@ await test('EVM leg is NOT swept after settle (no double-spend)', async () => {
   const base = mockBase();
   const src = mockLeg('evm', 'source', { drainTx: 'should-not-happen' });
   const dst = mockLeg('btc', 'dest', { drainTx: 'btc-sweep' });
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'executed');
   assert.equal(src.calls.filter(c => c.type === 'drain').length, 0, 'EVM leg must not be drained');
   assert.equal(dst.calls.filter(c => c.type === 'drain').length, 1, 'UTXO leg should be swept');
@@ -252,7 +281,7 @@ await test('settle failure throws and does NOT markExecuted', async () => {
   dst.settle = async () => { throw new Error('rpc down'); };
   let threw = false;
   try {
-    await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+    await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   } catch (e) { threw = true; }
   assert.ok(threw, 'runSwap should propagate settle failure');
   assert.equal(base.calls.filter(c => c.type === 'markExecuted').length, 0, 'must not mark executed on partial settlement');
@@ -261,7 +290,7 @@ await test('settle failure throws and does NOT markExecuted', async () => {
 await test('fee recovered on resume: legs settled but fee not yet settled', async () => {
   const base = mockBase({ sourceLegSettled: true, sourceLegTx: 'a', destLegSettled: true, destLegTx: 'b', feeSettled: false });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'executed');
   assert.equal(src.calls.filter(c => c.type === 'settle').length, 0); // legs skipped
   assert.equal(src.calls.filter(c => c.type === 'sendFee').length, 1); // fee re-sent
@@ -272,10 +301,9 @@ await test('fee recovered on resume: legs settled but fee not yet settled', asyn
 await test('fee skipped when already settled on-chain', async () => {
   const base = mockBase({ feeSettled: true, feeTxHash: 'prior-fee-tx' });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
-  assert.equal(r.feeSkipped, true);
-  assert.equal(r.feeTxId, 'prior-fee-tx');
-  assert.equal(src.calls.filter(c => c.type === 'sendFee').length, 0);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
+  assert.equal(src.calls.filter(c => c.type === 'sendFee').length, 0);   // fee not re-sent
   assert.equal(base.calls.filter(c => c.type === 'markFeeSettled').length, 0);
 });
 
@@ -284,7 +312,7 @@ await test('expiry refund_incomplete when a drain hard-fails (no markRefunded)',
   const src = mockLeg('evm', 'source');
   src.drain = async () => { throw new Error('rpc down'); };
   const dst = mockLeg('btc', 'dest', { drainTx: 'dst-refund' });
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'refund_incomplete');
   assert.equal(base.calls.filter(c => c.type === 'markRefunded').length, 0, 'must not finalize a partial refund');
 });
@@ -295,7 +323,7 @@ await test('markLegSettled failure mid-run throws before markExecuted', async ()
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
   let threw = false;
   try {
-    await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+    await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   } catch (e) { threw = true; }
   assert.ok(threw);
   assert.equal(base.calls.filter(c => c.type === 'markExecuted').length, 0);
@@ -307,7 +335,7 @@ await test('markLegSettled failure mid-run throws before markExecuted', async ()
 await test('F1 mapping: settle pays solver on source + user on dest', async () => {
   const base = mockBase({ feeBps: 0 });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'retain' }, src, dst, base);
+  await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'retain' }, src, dst, base);
   assert.equal(src.calls.find(c => c.type === 'settle').to, SOLVER_RECV_SRC);
   assert.equal(dst.calls.find(c => c.type === 'settle').to, USER_RECV_DST);
 });
@@ -316,7 +344,7 @@ await test('F1 mapping: refund pays user on source + solver on dest', async () =
   const base = mockBase({ expirationTs: Math.floor(Date.now() / 1000) - 100 });
   const src = mockLeg('evm', 'source', { drainTx: 'src-refund' });
   const dst = mockLeg('btc', 'dest', { drainTx: 'dst-refund' });
-  await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(src.calls.find(c => c.type === 'drain').to, USER_REFUND_SRC);
   assert.equal(dst.calls.find(c => c.type === 'drain').to, SOLVER_REFUND_DST);
 });
@@ -324,7 +352,7 @@ await test('F1 mapping: refund pays user on source + solver on dest', async () =
 await test('destAmount below floor -> error, no writes, no settle', async () => {
   const base = mockBase({ destAmount: '400000', minDestAmount: '500000' });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'error');
   assert.equal(base.calls.length, 0);
   assert.equal(src.calls.filter(c => c.type === 'settle').length, 0);
@@ -333,7 +361,7 @@ await test('destAmount below floor -> error, no writes, no settle', async () => 
 await test('destAmount at floor -> settles normally', async () => {
   const base = mockBase({ destAmount: '500000', minDestAmount: '500000', feeBps: 0 });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
-  const r = await runSwap(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'executed');
 });
 

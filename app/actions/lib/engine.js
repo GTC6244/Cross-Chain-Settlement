@@ -70,26 +70,69 @@ function bumpNonce(chainId, address) {
   __nonces[key] = (__nonces[key] || 0) + 1;
 }
 
+// ---- RPC resilience helpers -----------------------------------------------
+// Public/load-balanced RPCs are eventually-consistent and occasionally drop a
+// response. These helpers absorb transient faults so a flaky RPC does not turn
+// a settlement step into a hard failure (the cause of the intermittent 500s).
+function sleepMs(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+function rpcErrText(e) { return String((e && (e.message || e.code)) || e).toLowerCase(); }
+function isTransientRpc(e) {
+  var m = rpcErrText(e);
+  return m.indexOf("missing response") >= 0 || m.indexOf("timeout") >= 0 ||
+         m.indexOf("server_error") >= 0 || m.indexOf("bad result") >= 0 ||
+         m.indexOf("502") >= 0 || m.indexOf("503") >= 0 || m.indexOf("504") >= 0 ||
+         m.indexOf("econn") >= 0 || m.indexOf("network") >= 0 ||
+         m.indexOf("rate limit") >= 0 || m.indexOf("too many") >= 0;
+}
+// A broadcast that "fails" because the tx is already in the mempool/mined is a
+// success: the signed tx is deterministic, so its hash is already valid.
+function isAlreadyBroadcast(e) {
+  var m = rpcErrText(e);
+  return m.indexOf("already known") >= 0 || m.indexOf("known transaction") >= 0 ||
+         m.indexOf("already imported") >= 0 || m.indexOf("nonce too low") >= 0 ||
+         m.indexOf("replacement transaction underpriced") >= 0;
+}
+async function rpcRetry(fn, tries) {
+  var last;
+  for (var i = 0; i < tries; i++) {
+    try { return await fn(); }
+    catch (e) { last = e; if (!isTransientRpc(e)) throw e; await sleepMs(600 * (i + 1)); }
+  }
+  throw last;
+}
+// Gas price is fetched at most once per chain per run and reused for every tx,
+// to stay within the sandbox's ~24-call outbound-HTTP budget.
+var __gasPrice = {};
+async function getGasPriceCached(provider, chainId) {
+  if (__gasPrice[chainId] === undefined) {
+    var g = await provider.getGasPrice();
+    __gasPrice[chainId] = BigInt(g.toString());
+  }
+  return __gasPrice[chainId];
+}
+
 // ---- low-level EVM signer (micro-eth-signer) ------------------------------
 // Builds + signs with micro-eth-signer; uses the ethers provider for nonce,
 // gas, and broadcast only.
 async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
-  var provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  // Pin a static network so the provider never does an eth_chainId auto-detect
+  // round-trip per call (that detect intermittently failed with "could not
+  // detect network" and added latency that pushed txs past the receipt budget).
+  var provider = new ethers.providers.JsonRpcProvider(rpcUrl, { chainId: Number(chainId), name: "evm" });
   var from = ethAddr.fromPrivateKey(ctx.keyBytes);
   var nonce = await getNonce(provider, chainId, from);
-  var gasPrice = await provider.getGasPrice();           // BigNumber
-  var gp = BigInt(gasPrice.toString());
-  // EIP-1559 fields derived from gasPrice (testnets support 1559).
+  var gp = await getGasPriceCached(provider, chainId); // fetched once per chain/run
+  // EIP-1559 fields. Generous maxFee (3x) so txs mine within a couple blocks.
   var maxPriorityFeePerGas = gp;
-  var maxFeePerGas = gp * 2n;
-  var gasLimit;
-  try {
-    var est = await provider.estimateGas({ from: from, to: to, value: value, data: data || "0x" });
-    gasLimit = (BigInt(est.toString()) * 12n) / 10n;     // +20% buffer
-  } catch (e) {
-    gasLimit = data && data !== "0x" ? 120000n : 21000n; // fallback
-  }
-  var tx = EthTx.prepare({
+  var maxFeePerGas = gp * 3n;
+  // Fixed gas limits -- no estimateGas call. estimateGas both costs an HTTP
+  // request (the sandbox caps outbound calls ~24/run) AND reverts on
+  // read-after-write lag for contract writes. Value transfers need 21000;
+  // contract writes get generous headroom.
+  var gasLimit = (data && data !== "0x") ? 200000n : 21000n;
+  // micro-eth-signer rejects an explicit undefined data field ("fields had
+  // validation errors"); the key must be ABSENT for plain value transfers.
+  var txFields = {
     to: to,
     value: value,
     nonce: BigInt(nonce),
@@ -97,38 +140,63 @@ async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
     maxPriorityFeePerGas: maxPriorityFeePerGas,
     gasLimit: gasLimit,
     chainId: BigInt(chainId),
-    data: data || undefined,
-  });
+  };
+  if (data && data !== "0x") txFields.data = data;
+  var tx = EthTx.prepare(txFields);
   var signed = tx.signBy(ctx.keyBytes);
   var raw = signed.toHex();
   var rawHex = raw.indexOf("0x") === 0 ? raw : "0x" + raw;
-  var txHash = await provider.send("eth_sendRawTransaction", [rawHex]);
-  bumpNonce(chainId, from);   // nonce is consumed once the broadcast is accepted
-  // Wait for inclusion so the state machine never advances on an unmined tx.
-  // A reverted tx (status 0) throws -> the run aborts and is safe to retry.
-  var rcpt = await provider.waitForTransaction(txHash, 1);
-  if (!rcpt || rcpt.status === 0) throw new Error("evm tx reverted: " + txHash);
+  var txHash = signed.hash.indexOf("0x") === 0 ? signed.hash : "0x" + signed.hash;
+  // Broadcast only -- do NOT poll for the receipt here. The sandbox's ~24-call
+  // HTTP budget can't afford per-tx polling (it starved later legs and stranded
+  // them). Safety comes from NONCE ORDERING instead: every tx is from this one
+  // EOA with sequential nonces, so the final markExecuted (highest nonce) cannot
+  // be mined until all the value transfers (lower nonces) have mined. Plain ETH
+  // value transfers from a funded address cannot revert. The caller confirms
+  // completion by polling the contract state.
+  for (var i = 0; i < 3; i++) {
+    try { await provider.send("eth_sendRawTransaction", [rawHex]); break; }
+    catch (e) {
+      if (isAlreadyBroadcast(e)) break;                  // already in mempool/mined
+      if (!isTransientRpc(e) || i === 2) throw e;
+      await sleepMs(500 * (i + 1));
+    }
+  }
+  bumpNonce(chainId, from);
   return txHash;
 }
 
 // ---- Base contract writer -------------------------------------------------
 function makeBaseWriter(ctx) {
-  var provider = new ethers.providers.JsonRpcProvider(ctx.params.baseRpcUrl);
+  // Pin a static network so reads/writes never trigger a per-call eth_chainId
+  // auto-detect (that intermittently failed and wasted HTTP budget). The Base
+  // chainId is read once, with retry, then reused.
+  var detectProvider = new ethers.providers.JsonRpcProvider(ctx.params.baseRpcUrl);
+  var providerPromise = rpcRetry(function () { return detectProvider.getNetwork(); }, 5).then(function (n) {
+    return new ethers.providers.JsonRpcProvider(ctx.params.baseRpcUrl, { chainId: n.chainId, name: "evm" });
+  });
   var iface = new ethers.utils.Interface(ABI);
-  var chainIdPromise = provider.getNetwork().then(function (n) { return n.chainId; });
+  var read = new ethers.Contract(ctx.params.contractAddress, ABI, detectProvider);
+  var swapId = ctx.params.swapId;
   async function write(method, args) {
     var data = iface.encodeFunctionData(method, args);
-    var chainId = await chainIdPromise;
-    return evmSignSend(ctx, ctx.params.baseRpcUrl, chainId, ctx.params.contractAddress, 0n, data);
+    var p = await providerPromise;
+    var net = await p.getNetwork();
+    return evmSignSend(ctx, ctx.params.baseRpcUrl, net.chainId, ctx.params.contractAddress, 0n, data);
   }
+  // Plain broadcasts (no per-write idempotency reads): re-issuing a done step is
+  // prevented by the top-level state read in runSwap (settled legs / Executed
+  // state are skipped before any write), and nonce ordering makes markExecuted
+  // safe. Keeping writes call-light is what keeps a full run under the ~24-call
+  // sandbox HTTP budget.
   return {
-    provider: provider,
-    read: new ethers.Contract(ctx.params.contractAddress, ABI, provider),
-    getFeeStatus: function () { return new ethers.Contract(ctx.params.contractAddress, ABI, provider).getFeeStatus(ctx.params.swapId); },
-    markLegSettled: function (isSource, txid) { return write("markLegSettled", [ctx.params.swapId, isSource, txid]); },
-    markFeeSettled: function (txid) { return write("markFeeSettled", [ctx.params.swapId, txid]); },
-    markExecuted: function () { return write("markExecuted", [ctx.params.swapId]); },
-    markRefunded: function () { return write("markRefunded", [ctx.params.swapId]); },
+    provider: detectProvider,
+    read: read,
+    getFeeStatus: function () { return read.getFeeStatus(swapId); },
+    markLegSettled: function (isSource, txid) { return write("markLegSettled", [swapId, isSource, txid]); },
+    markFeeSettled: function (txid) { return write("markFeeSettled", [swapId, txid]); },
+    markExecuted: function () { return write("markExecuted", [swapId]); },
+    markRefunded: function () { return write("markRefunded", [swapId]); },
   };
 }
 
@@ -137,7 +205,10 @@ function makeEvmLeg(ctx, chainId_, role) {
   var cfg = CHAINS[chainId_];
   var rpcUrl = cfg.rpc;
   var chainId = cfg.chainId;
-  var provider = new ethers.providers.JsonRpcProvider(rpcUrl);
+  // Pin a static network so the provider never does an eth_chainId auto-detect
+  // round-trip per call (that detect intermittently failed with "could not
+  // detect network" and added latency that pushed txs past the receipt budget).
+  var provider = new ethers.providers.JsonRpcProvider(rpcUrl, { chainId: Number(chainId), name: "evm" });
   return {
     label: "evm",
     role: role,
@@ -172,9 +243,12 @@ function makeEvmLeg(ctx, chainId_, role) {
 //         feeLeg: "source"|"dest", feeMode: "send-evm"|"retain" }
 async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
   var params = ctx.params;
-  var base = baseOverride || makeBaseWriter(ctx);
 
   // ---- derive mode: return every address this action controls ----
+  // Must short-circuit BEFORE makeBaseWriter: derive callers do not pass a
+  // contractAddress (none exists yet), and makeBaseWriter eagerly constructs an
+  // ethers.Contract from it — which throws on undefined. Derive needs only the
+  // action key + per-leg derivation, never the Base contract.
   if (params.mode === "derive") {
     var out = { evmAddress: ethAddr.fromPrivateKey(ctx.keyBytes) };
     out[sourceLeg.label + "AddressSource"] = await sourceLeg.deriveAddress();
@@ -182,12 +256,15 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
     return out;
   }
 
-  // ---- read contract state ----
-  var state = await base.read.getSwapState(params.swapId);
-  var addrs = await base.read.getSwapAddresses(params.swapId);
-  var intent = await base.read.getSwapIntent(params.swapId);
-  var legs = await base.read.getSwapLegs(params.swapId);
-  var owner = await base.read.owner();
+  var base = baseOverride || makeBaseWriter(ctx);
+
+  // ---- read contract state (retry-wrapped: the first read triggers the
+  // provider's network detection, which can transiently fail) ----
+  var state = await rpcRetry(function () { return base.read.getSwapState(params.swapId); }, 5);
+  var addrs = await rpcRetry(function () { return base.read.getSwapAddresses(params.swapId); }, 5);
+  var intent = await rpcRetry(function () { return base.read.getSwapIntent(params.swapId); }, 5);
+  var legs = await rpcRetry(function () { return base.read.getSwapLegs(params.swapId); }, 5);
+  var owner = await rpcRetry(function () { return base.read.owner(); }, 5);
 
   var swapState = state[0];
   var sourceAmount = BigInt(state[3].toString());
@@ -240,113 +317,99 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
     return { status: "error", message: "destAmount below floor (" + destAmount.toString() + " < " + minDestAmount.toString() + ")" };
   }
 
-  // ---- balance checks for unsettled legs ----
-  if (!sourceLegSettled) {
-    var sb = await sourceLeg.getBalance(depositSource);
-    if (sb < sourceAmount) return { status: "insufficient_funds", leg: "source",
-      balance: sb.toString(), required: sourceAmount.toString(), destLegSettled: destLegSettled };
-  }
-  if (!destLegSettled) {
-    var db = await destLeg.getBalance(depositDest);
-    if (db < destAmount) return { status: "insufficient_funds", leg: "dest",
-      balance: db.toString(), required: destAmount.toString(), sourceLegSettled: sourceLegSettled };
-  }
-
   // ---- fee math (rear-loaded, basis points on the fee leg's amount) ----
   var fee = (CFG.feeLeg === "source" ? sourceAmount : destAmount) * feeBps / 10000n;
   var sourceNet = sourceAmount - (CFG.feeLeg === "source" ? fee : 0n);
   var destNet = destAmount - (CFG.feeLeg === "dest" ? fee : 0n);
 
-  var result = {
-    status: "executed",
-    sourceLegSettled: sourceLegSettled,
-    destLegSettled: destLegSettled,
-    resumed: sourceLegSettled || destLegSettled,
-  };
+  // ---- ONE STEP PER INVOCATION -------------------------------------------
+  // Each invocation performs at most ONE settlement step (settle a leg, pay the
+  // fee, or finalize) then returns. This bounds outbound HTTP per run well under
+  // the Lit sandbox's ~24-call cap -- REQUIRED once legs add API calls (UTXO
+  // fetch/feerate/broadcast for BTC/LTC/DOGE; RPC for EVM), and harmless for
+  // EVM<>EVM. The caller re-invokes until status === "executed"; the top-level
+  // on-chain reads above make each step idempotent (a settled leg / Executed
+  // state is skipped on the next run). Balance is checked only for the leg being
+  // settled this run, to save calls. Settlement cross: source-chain funds pay
+  // the solver (solverReceiveSource); dest-chain funds pay the user (userReceiveDest).
 
-  // Settlement cross: source-chain funds pay the solver (solverReceiveSource);
-  // dest-chain funds pay the user (userReceiveDest).
-  async function settleSource() {
-    if (!sourceLegSettled) {
-      var txid = await sourceLeg.settle({ to: solverReceiveSource, amount: sourceNet, deposit: depositSource });
-      result.sourceTxId = txid;
-      await base.markLegSettled(true, txid);
-      sourceLegSettled = true;
-    } else { result.sourceTxId = legs[2]; result.sourceSkipped = true; }
+  // SAFETY: never settle ANY leg until BOTH legs are funded (or already
+  // settled). Checking only the leg about to settle would let us pay one side
+  // while the other can't be funded -- a one-sided settlement. So verify every
+  // unsettled leg's balance up front, before broadcasting anything.
+  if (!sourceLegSettled) {
+    var sbal = await sourceLeg.getBalance(depositSource);
+    if (sbal < sourceAmount) return { status: "insufficient_funds", leg: "source",
+      balance: sbal.toString(), required: sourceAmount.toString() };
   }
-  async function settleDest() {
-    if (!destLegSettled) {
-      var txid = await destLeg.settle({ to: userReceiveDest, amount: destNet, deposit: depositDest });
-      result.destTxId = txid;
-      await base.markLegSettled(false, txid);
-      destLegSettled = true;
-    } else { result.destTxId = legs[3]; result.destSkipped = true; }
+  if (!destLegSettled) {
+    var dbal = await destLeg.getBalance(depositDest);
+    if (dbal < destAmount) return { status: "insufficient_funds", leg: "dest",
+      balance: dbal.toString(), required: destAmount.toString() };
   }
 
+  // step 1: settle the next unsettled leg, honoring CFG.settleOrder.
   for (var i = 0; i < CFG.settleOrder.length; i++) {
-    if (CFG.settleOrder[i] === "source") await settleSource(); else await settleDest();
+    var side = CFG.settleOrder[i];
+    if (side === "source" && !sourceLegSettled) {
+      var stx = await sourceLeg.settle({ to: solverReceiveSource, amount: sourceNet, deposit: depositSource });
+      await base.markLegSettled(true, stx);
+      return { status: "in_progress", step: "settle-source", sourceTxId: stx };
+    }
+    if (side === "dest" && !destLegSettled) {
+      var dtx = await destLeg.settle({ to: userReceiveDest, amount: destNet, deposit: depositDest });
+      await base.markLegSettled(false, dtx);
+      return { status: "in_progress", step: "settle-dest", destTxId: dtx };
+    }
   }
 
-  // ---- fee step (idempotent + recoverable) ----
-  // Decoupled from leg settlement and keyed on the on-chain feeSettled flag, so
-  // a crash between a leg settling and the fee being paid is recovered on the
-  // next run instead of silently dropping the fee.
+  // step 2: pay the fee (idempotent on the on-chain feeSettled flag).
   if (CFG.feeMode === "send-evm" && fee > 0n) {
     var feeStatus = await base.getFeeStatus(); // [feeSettled, feeTxHash]
-    if (feeStatus[0]) {
-      result.feeTxId = feeStatus[1];
-      result.feeSkipped = true;
-    } else {
+    if (!feeStatus[0]) {
       var feeLeg = CFG.feeLeg === "source" ? sourceLeg : destLeg;
       var feeDeposit = CFG.feeLeg === "source" ? depositSource : depositDest;
       if (feeLeg.sendFee) {
-        var feeTx = await feeLeg.sendFee({ to: owner, amount: fee, deposit: feeDeposit });
-        result.feeTxId = feeTx;
-        await base.markFeeSettled(feeTx);
+        var ftx = await feeLeg.sendFee({ to: owner, amount: fee, deposit: feeDeposit });
+        await base.markFeeSettled(ftx);
+        return { status: "in_progress", step: "fee", feeTxId: ftx };
       }
     }
-  } else if (CFG.feeMode === "retain" && fee > 0n) {
-    result.feeRetained = fee.toString();
-    result.feeNote = "Fee retained in action wallet for batch collection (no EVM payout leg)";
   }
 
-  // ---- sweep excess deposits back to depositors ----
-  // Each leg returns its overfunded remainder to its refund address. The fee
-  // leg is skipped when fees are retained (no EVM payout), so the fee stays in
-  // the action wallet for batch collection. UTXO drains naturally no-op right
-  // after settle (the spent/change outputs aren't confirmed yet); the EVM drain
-  // is best-effort and only catches excess once the settle tx is mined.
+  // step 3: best-effort sweep of overfunded UTXO/ZEC deposits (no-op + cheap, so
+  // folded into the finalize run). EVM legs are NEVER swept: settle() already
+  // sent the exact net from this same account, and drain() would re-send the
+  // still-unmined balance (double-spend / nonce wedge); EVM overfunding is
+  // recovered via the expiry refund path. UTXO/ZEC drains only spend CONFIRMED
+  // utxos, so the just-broadcast change is invisible and the drain no-ops.
   async function sweepLeg(leg, depositAddr, refundAddr, isFeeLeg) {
-    if (isFeeLeg && CFG.feeMode === "retain") return;
-    // Never sweep an EVM (account-model) leg after settlement: settle() already
-    // sent the exact net amount from this same address, and drain() reads the
-    // (likely still-unmined) balance and would re-send nearly all of it ->
-    // double-spend / nonce wedge. EVM overfunding is recovered via the expiry
-    // refund path instead. UTXO/ZEC legs are safe (drain only spends confirmed
-    // UTXOs, so the just-broadcast change is invisible and drain no-ops).
     if (leg.label === "evm") return;
-    try { var s = await leg.drain({ to: refundAddr, deposit: depositAddr }); if (s) result[leg.role + "Sweep"] = s; }
-    catch (e) { result[leg.role + "SweepNote"] = String(e.message || e); }
+    if (isFeeLeg && CFG.feeMode === "retain") return;
+    try { await leg.drain({ to: refundAddr, deposit: depositAddr }); } catch (e) {}
   }
   await sweepLeg(sourceLeg, depositSource, userRefundSource, CFG.feeLeg === "source");
   await sweepLeg(destLeg, depositDest, solverRefundDest, CFG.feeLeg === "dest");
 
-  // ---- mark fully executed (contract enforces both legs settled) ----
+  // step 4: finalize (contract enforces both legs settled).
   await base.markExecuted();
 
   // ---- signed receipt (EIP-191 via micro-eth-signer) ----
-  // Receipt must be byte-identical across every Lit node so the threshold
-  // signature aggregates. Do NOT put Date.now() here — use the deterministic
-  // on-chain expiration. (Tx hashes are read from contract/leg results, which
-  // are also deterministic once both legs are settled.)
+  // Byte-identical across Lit nodes (threshold sig). Do NOT put Date.now() here.
+  // Tx hashes come from the on-chain leg records, set when each leg was marked.
   var receipt = JSON.stringify({
-    swapId: params.swapId, sourceTx: result.sourceTxId, destTx: result.destTxId,
+    swapId: params.swapId, sourceTx: legs[2], destTx: legs[3],
     sourceAmount: sourceAmount.toString(), destAmount: destAmount.toString(),
-    fee: fee.toString(), resumed: result.resumed, expiration: expirationTs,
+    fee: fee.toString(), expiration: expirationTs,
   });
-  result.receipt = receipt;
-  result.receiptSignature = eip191Signer.sign(receipt, ctx.keyBytes);
-  return result;
+  return {
+    status: "executed",
+    sourceLegSettled: true, destLegSettled: true,
+    sourceTxId: legs[2], destTxId: legs[3],
+    feeRetained: (CFG.feeMode === "retain" && fee > 0n) ? fee.toString() : undefined,
+    receipt: receipt,
+    receiptSignature: eip191Signer.sign(receipt, ctx.keyBytes),
+  };
 }
 `;
 }

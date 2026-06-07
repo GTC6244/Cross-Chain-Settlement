@@ -9,20 +9,38 @@ These are the real production blockers. The engine state machine (`runSwap`) and
 UTXO coin-selection math are unit-tested, but in-sandbox signing/broadcast for each
 pair runs only in the Lit runtime and is not covered by the Node tests.
 
-- **Verify in-sandbox signing/broadcast on live testnets for every pair**
+- **Verify in-sandbox signing/broadcast on live for the remaining pairs**
   **Priority:** P1
-  Only the engine + UTXO math are exercised by `test/`. The signers and the
-  ZIP-243 shim run only inside the Lit runtime and need live verification before
-  production use.
+  Done live: EVM↔EVM (Base mainnet) and EVM↔BTC (Base mainnet ↔ signet), full
+  settle path; `derive` mode verified live for all 11 pairs. Still need a live
+  settle: the Zcash pairs, the Solana pairs, and Bitcoin↔Litecoin / Bitcoin↔Dogecoin.
+  (LTC/DOGE reuse the same UTXO leg as BTC, now proven, so they're lower-risk.)
 
 - **Wire a live Zcash provider for the ZEC pairs**
   **Priority:** P1
   ZIP-243 shim is verified on regtest only. `evm-zec`, `btc-zec`, `zec-sol`,
   `zec-ltc`, `zec-doge` need a live provider before production.
 
-- **Bitcoin / Litecoin testnet verification**
+- **Litecoin testnet verification**
   **Priority:** P2
-  `evm-btc`, `btc-ltc`, `btc-sol` are marked "needs testnet".
+  `evm-btc` is now verified live on signet. `btc-ltc` and `btc-sol` still need a
+  live run (same UTXO leg as BTC, just different network params).
+
+- **Production: inject the leg RPC via params instead of embedding it**
+  **Priority:** P2
+  The leg RPC lives in `networks.js`, so it's baked into the published action
+  code (CID). For testing we point Base at a dedicated Alchemy endpoint via a
+  local-only `networks.js` edit, but a published action must NOT carry an API key.
+  Pass the leg RPC through `js_params` (like `baseRpcUrl`) so the committed/published
+  template stays key-free.
+
+- **Production: confirmation pass for UTXO legs**
+  **Priority:** P2
+  EVM legs are safe via nonce ordering (finalize can't mine before the value
+  transfers). UTXO legs (BTC/LTC/DOGE) have no such ordering — the BTC leg is
+  marked settled right after broadcast. On signet that's fine; for production,
+  add a step that confirms the broadcast tx before finalize, or a re-org/late-fail
+  recovery path.
 
 - **Dogecoin testnet + broadcast API**
   **Priority:** P2
@@ -81,6 +99,11 @@ verification (see Chain Verification) and the phase-2 items below.
 
 ## Completed
 
+- **First live cross-chain settlement: EVM↔BTC** — Base mainnet (EVM) ↔ signet (BTC), both legs settled + signed receipt; real signet tx broadcast (first live `@scure/btc-signer` exercise). **Completed:** 2026-06-05
+- **First live EVM↔EVM settlement on Base mainnet** — full settle path (both legs, fee, markExecuted, signed receipt). **Completed:** 2026-06-05
+- **One-step-per-invocation engine (HTTP-frugal)** — fixed the intermittent 500s (Lit sandbox ~24-call HTTP cap); each `execute` does one step, caller invokes-then-polls. Solver app updated. **Completed:** 2026-06-05
+- **Live-execution bug fixes** — derive-mode crash, UTXO `pubECDSA` rename, EVM signer `undefined` data field. **Completed:** 2026-06-05
+- **Contract deployed to Base mainnet** — `0xC0a9c217e643DbdF1b6195a18C0802a1231507A1`, wired into `app/lib/contract.js`. **Completed:** 2026-06-05
 - **Two-sided market: user + solver apps (signed-intent + solver-builds-swap)** — contract `announceIntent`/`createSwap`, engine 4-address mapping + floor assert, shared `app/lib/*`, `index.html` + `solver.html`, deploy script. **Completed:** 2026-06-05
 - **F1: four-address model (latent cross-chain bug)** — `SwapContract.sol` + `engine.js` + mapping tests. **Completed:** 2026-06-05
 - **Inputs bumped to 16px (no iOS zoom-on-focus)** — `app/settled.css`. **Completed:** 2026-06-05
