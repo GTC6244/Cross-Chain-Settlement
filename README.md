@@ -99,7 +99,7 @@ RE-EXECUTION:
 
 **One step per invocation + the HTTP budget.** The Lit sandbox caps an action's outbound HTTP calls per run (~24), so the action does **one settlement step per invocation** (settle a leg, pay the fee, or finalize) and returns; the caller re-invokes until the swap is executed. Each step is idempotent — the action reads the on-chain leg/fee/state flags at the top of every run and skips anything already done — so a crash, timeout, or sandbox kill mid-swap is recovered by the next invocation. Before settling either leg it checks that BOTH deposits are funded, so it never pays one side when the other can't be.
 
-**Crash hardening:** the EVM signer broadcasts without waiting for each receipt (per-tx polling would blow the HTTP budget). Correctness comes from nonce ordering instead: the finalize transaction can't be mined until every value transfer before it has, and plain value transfers from a funded account can't revert. The fee is logged on-chain (`markFeeSettled`) independently of the legs, so a crash between a leg settling and the fee being paid is recovered on re-execution. If an expiry refund's drains hard-fail (e.g. RPC down), the swap is left `Created` (status `refund_incomplete`) rather than finalized, so funds are never stranded in a terminal `Refunded` state.
+**Crash hardening:** the EVM signer broadcasts without waiting for each receipt (per-tx polling would blow the HTTP budget). Correctness comes from nonce ordering instead: the finalize transaction can't be mined until every value transfer before it has, and plain value transfers from a funded account can't revert. The fee is logged on-chain (`markFeeSettled`) independently of the legs, so a crash between a leg settling and the fee being paid is recovered on re-execution. If an expiry refund's drains hard-fail (e.g. RPC down), the swap is left `Created` (status `refund_incomplete`) rather than finalized, so funds are never stranded in a terminal `Refunded` state. UTXO/Zcash legs, which have no nonce ordering, are held back from finalize until their settlement transaction reaches the swap's `confirmationBlocks` depth (fail-closed: an explorer that can't be reached defers finalize rather than assuming success).
 
 The contract stores the tx hash for each leg, making every settlement step auditable.
 
@@ -188,7 +188,7 @@ All signing uses Paul Miller's audited, pure-JS, zero-dependency [noble/scure/mi
 
 All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "execute"` advances the swap by one idempotent step per invocation (settle a leg / pay fee / finalize). The caller invokes, waits for the step to land on-chain, and invokes again until the swap reads `Executed` — re-invoking while a step is still pending would recompute nonces and double-send.
 
-**Security:** actions read ALL params from the on-chain contract. Only `swapId`, `baseRpcUrl`, and `contractAddress` are passed via `js_params`.
+**Security:** actions read ALL settlement params from the on-chain contract. Only `swapId`, `baseRpcUrl`, `contractAddress`, and `legRpcUrls` are passed via `js_params`. The RPC endpoints arrive at runtime rather than being baked in, so the action code embedded in the published CID carries no API key (the value left in `networks.js` is a key-free public node used as the default).
 
 **Settlement order:** slower/riskier chain settles first. After each leg, the action logs to the contract before proceeding; on re-execution, settled legs are skipped.
 

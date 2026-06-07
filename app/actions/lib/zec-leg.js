@@ -170,6 +170,19 @@ async function zecFetchUtxos(cfg, address) {
   return utxo.map(function (u) { return { txid: u.transaction_hash, vout: u.index, amount: BigInt(u.value) }; });
 }
 
+// Confirmations for a broadcast txid (see utxoConfirmations — same fail-closed
+// contract: 0 means keep waiting). zcashd reports confirmations directly.
+async function zecConfirmations(cfg, txid) {
+  if (cfg.api.style === "zcashd") {
+    var t = await zecRpc(cfg, "getrawtransaction", [txid, 1]);
+    return (t && t.confirmations > 0) ? t.confirmations : 0;
+  }
+  var resp = await fetch(cfg.api.base + "/tx/" + txid);
+  if (!resp.ok) return 0;
+  var data = await resp.json();
+  return (data && data.confirmations > 0) ? data.confirmations : 0;
+}
+
 async function zecBroadcast(cfg, rawHex) {
   if (cfg.api.style === "zcashd") {
     return zecRpc(cfg, "sendrawtransaction", [rawHex]);
@@ -210,6 +223,8 @@ function makeZecLeg(ctx, chainId_, role) {
       var t = 0n; for (var i = 0; i < utxos.length; i++) t += utxos[i].amount;
       return t;
     },
+    // See the UTXO leg's confirmations(): gate finalize on settlement depth.
+    confirmations: function (txid) { return zecConfirmations(cfg, txid); },
     settle: async function (o) {
       var branchId = await zecBranchId(cfg);
       var utxos = await zecFetchUtxos(cfg, o.deposit);

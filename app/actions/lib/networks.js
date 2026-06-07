@@ -11,6 +11,13 @@
  * action code runs in the Lit sandbox and cannot import local files — only
  * jsDelivr ESM URLs.
  *
+ * RPC endpoints here MUST stay key-free: this subset is embedded in the action
+ * code, so its hash IS the published CID — anything here ships to IPFS for
+ * anyone to read. The EVM `rpc` values are key-free public nodes used as the
+ * default; to point a leg at a private/keyed endpoint at runtime, inject it via
+ * the `legRpcUrls` js_param (chainId → url) instead of editing it here. The
+ * engine's makeEvmLeg prefers `params.legRpcUrls[chain]` over this default.
+ *
  * Testnet values throughout. Anything here that touches the live network
  * (API base URLs, Zcash consensus branch id, fee rates) is the part that
  * needs verification on a live testnet before production use.
@@ -18,7 +25,8 @@
 
 export const CHAINS = {
   // ---- EVM (secp256k1, signed with micro-eth-signer) --------------------
-  'base':              { family: 'evm', rpc: 'https://base-mainnet.g.alchemy.com/v2/I8YSJejgkmfb3KEB5LyLM', chainId: 8453 },
+  // Key-free public default (see header). Override at runtime via legRpcUrls.
+  'base':              { family: 'evm', rpc: 'https://base-rpc.publicnode.com',  chainId: 8453 },
   'base-sepolia':      { family: 'evm', rpc: 'https://sepolia.base.org',            chainId: 84532 },
   'ethereum-sepolia':  { family: 'evm', rpc: 'https://rpc.sepolia.org',             chainId: 11155111 },
   'arbitrum-sepolia':  { family: 'evm', rpc: 'https://sepolia-rollup.arbitrum.io/rpc', chainId: 421614 },
@@ -121,18 +129,12 @@ export const CHAINS = {
   },
 };
 
-/** EVM rpc lookup, embedded for the engine's contract + EVM-leg use. */
-export function evmRpcMap() {
-  const m = {};
-  for (const [id, c] of Object.entries(CHAINS)) {
-    if (c.family === 'evm') m[id] = { rpc: c.rpc, chainId: c.chainId };
-  }
-  return m;
-}
-
 /**
  * Emit a code string that defines `var CHAINS = {...}` inside the action.
  * Pass the chain ids the action actually uses to keep the embed minimal.
+ * The Base contract RPC is injected at runtime (params.baseRpcUrl); EVM leg
+ * RPCs default to the key-free `rpc` here and can be overridden per chain via
+ * params.legRpcUrls — so no endpoint needs to be embedded for the contract.
  */
 export function chainConfigSrc(ids) {
   const subset = {};
@@ -140,7 +142,5 @@ export function chainConfigSrc(ids) {
     if (!CHAINS[id]) throw new Error(`Unknown chain id: ${id}`);
     subset[id] = CHAINS[id];
   }
-  // Always include the EVM rpc map (the contract lives on Base/EVM and every
-  // action needs to read/write it regardless of the swap's chains).
-  return `var CHAINS = ${JSON.stringify(subset)};\nvar EVM_RPC = ${JSON.stringify(evmRpcMap())};\n`;
+  return `var CHAINS = ${JSON.stringify(subset)};\n`;
 }

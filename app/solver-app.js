@@ -248,6 +248,11 @@ async function executeSwap() {
     // and recompute nonces. On-chain state is the source of truth.
     const fingerprint = (sw) => `${sw.state}|${sw.sourceLegSettled}|${sw.destLegSettled}|${sw.sourceLegTxHash}|${sw.destLegTxHash}`;
     const MAX_STEPS = 8;
+    // Confirmation waiting doesn't advance on-chain state, so it can't consume
+    // settlement-step budget; bound it on its own (~8 min at 8s/poll) for slow
+    // testnet blocks.
+    const MAX_CONF_WAITS = 60;
+    let confWaits = 0;
     let executed = false;
     for (let step = 1; step <= MAX_STEPS && !executed; step++) {
       const before = fingerprint(s);
@@ -257,7 +262,10 @@ async function executeSwap() {
         const resp = await fetch(`${LIT_API_BASE}/core/v1/lit_action`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Api-Key': litKey },
-          body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS } }),
+          // legRpcUrls injects the leg RPC at runtime (chain → url) so the
+          // published action CID carries no keyed endpoint; the embedded
+          // key-free public default applies for any chain not listed here.
+          body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS, legRpcUrls: CHAIN_RPC } }),
         });
         const raw = await resp.text();
         if (resp.ok) {
@@ -281,6 +289,19 @@ async function executeSwap() {
       }
       if (r && r.status === 'error') { log(out, 'Action error: ' + (r.message || JSON.stringify(r)), 'error'); return; }
 
+      // The UTXO/ZEC settle tx isn't deep enough to finalize yet. Nothing has
+      // changed on-chain, so just wait and re-invoke (the action re-checks).
+      if (r && r.status === 'awaiting_confirmations') {
+        log(out, `Confirming ${r.leg} leg (${r.chain}): ${r.confirmations}/${r.required} — tx ${r.txid}`, 'dim');
+        if (++confWaits > MAX_CONF_WAITS) {
+          log(out, `Settlement tx still unconfirmed after ${MAX_CONF_WAITS} checks — it may be stuck; funds refund at expiry. Try execute again later.`, 'warn');
+          return;
+        }
+        step--;                 // don't burn settlement-step budget while waiting
+        await sleep(8000);
+        continue;
+      }
+
       // Wait for the step to land on-chain (state/legs change), then re-invoke
       // the next step. markExecuted is the highest nonce, so Executed implies
       // every value transfer below it has mined.
@@ -301,7 +322,7 @@ async function executeSwap() {
       log(out, 'Source tx (your receipt): ' + s.sourceLegTxHash);
       log(out, 'Dest tx (paid to user): ' + s.destLegTxHash);
     } else {
-      log(out, `Swap still ${s.stateName} after ${MAX_INVOCATIONS} invocations — check funding/RPC and try again.`, 'warn');
+      log(out, `Swap still ${s.stateName} after ${MAX_STEPS} steps — check funding/RPC and try again.`, 'warn');
     }
   } catch (err) { log(out, 'Error: ' + err.message, 'error'); console.error(err); }
 }

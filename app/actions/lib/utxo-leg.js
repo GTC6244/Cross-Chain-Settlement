@@ -156,6 +156,31 @@ async function utxoFeeRate(cfg) {
   return cfg.defaultFeeRate;
 }
 
+// Confirmations for a broadcast txid. 0 = unconfirmed / not yet seen / lookup
+// failed -> the confirmation gate treats 0 as "keep waiting", so a transient
+// explorer hiccup defers finalize rather than passing it through (fail-closed).
+async function utxoConfirmations(cfg, txid) {
+  if (cfg.api.style === "esplora") {
+    var sr = await fetch(cfg.api.base + "/tx/" + txid + "/status");
+    if (!sr.ok) return 0;
+    var st = await sr.json();
+    if (!st || !st.confirmed) return 0;
+    var tr = await fetch(cfg.api.base + "/blocks/tip/height");
+    if (!tr.ok) return 1;                       // confirmed, tip unknown -> >=1
+    var tip = parseInt((await tr.text()).trim(), 10);
+    if (!Number.isFinite(tip) || !Number.isFinite(st.block_height)) return 1;
+    return tip - st.block_height + 1;
+  }
+  // blockchair-style: one call carries both the tx block and the chain tip.
+  var r = await fetch(cfg.api.base + "/dashboards/transaction/" + txid);
+  if (!r.ok) return 0;
+  var data = await r.json();
+  var txd = data.data && data.data[txid] && data.data[txid].transaction;
+  if (!txd || !txd.block_id || txd.block_id <= 0) return 0;   // mempool/unseen
+  var state = data.context && data.context.state;             // current height
+  return state ? (state - txd.block_id + 1) : 1;
+}
+
 function makeUtxoLeg(ctx, chainId_, role) {
   var cfg = CHAINS[chainId_];
   var isSegwit = cfg.addrType === "p2wpkh";
@@ -190,6 +215,10 @@ function makeUtxoLeg(ctx, chainId_, role) {
       var t = 0n; for (var i = 0; i < utxos.length; i++) t += utxos[i].amount;
       return t;
     },
+    // Gate finalize on the settlement tx reaching confirmationBlocks depth: a
+    // UTXO settle has no nonce ordering protecting it, so a 0-conf broadcast can
+    // still be dropped/re-orged before this signs the (terminal) receipt.
+    confirmations: function (txid) { return utxoConfirmations(cfg, txid); },
     settle: async function (o) {
       var utxos = await utxoFetchUtxos(cfg, o.deposit);
       var feeRate = await utxoFeeRate(cfg);
