@@ -219,6 +219,8 @@ async function fundDest() {
   } catch (err) { log(out, 'Error: ' + err.message, 'error'); console.error(err); }
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function executeSwap() {
   const out = 'fill-output';
   clearLog(out);
@@ -227,7 +229,8 @@ async function executeSwap() {
   if (swapId === '') { log(out, 'Enter a swap ID.', 'error'); return; }
   if (!litKey) { log(out, 'Enter your Lit API key.', 'error'); return; }
   try {
-    const s = await readSwap(swapId);
+    let s = await readSwap(swapId);
+    if (s.state === 2) { log(out, 'Swap already Executed.', 'success'); renderFillLegs(s); return; }
     const tkey = templateKeyForChains(s.sourceChain, s.destChain);
     if (!tkey) { log(out, 'Unsupported chain pair.', 'error'); return; }
     // Regenerate the action from the on-chain salt and confirm the CID matches.
@@ -235,30 +238,69 @@ async function executeSwap() {
     log(out, 'Verifying CID before execute…', 'dim');
     const computed = await computeCid(code);
     if (computed !== s.litActionCid) { log(out, 'CID mismatch — refusing to execute.', 'error'); return; }
-    log(out, 'CID verified. Executing Lit Action (10-30s)…', 'dim');
-    const resp = await fetch(`${LIT_API_BASE}/core/v1/lit_action`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Api-Key': litKey },
-      body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS } }),
-    });
-    if (!resp.ok) { log(out, 'Lit API error: ' + resp.status, 'error'); log(out, await resp.text(), 'error'); return; }
-    const result = await resp.json();
-    const r = typeof result.response === 'string' ? JSON.parse(result.response) : result.response;
-    log(out, '');
-    if (r.status === 'executed') {
-      log(out, '=== SWAP EXECUTED ===', 'success');
-      log(out, 'Source tx (your receipt): ' + r.sourceTxId);
-      log(out, 'Dest tx (paid to user): ' + r.destTxId);
-      if (r.feeTxId) log(out, 'Fee tx: ' + r.feeTxId, 'dim');
-      if (r.receiptSignature) log(out, 'Signed receipt: ' + r.receiptSignature, 'dim');
-    } else if (r.status === 'insufficient_funds') {
-      log(out, '=== INSUFFICIENT FUNDS (' + r.leg + ') ===', 'warn');
-      log(out, 'balance ' + r.balance + ' / required ' + r.required);
-      log(out, 'Fund the ' + r.leg + ' leg and retry.');
-    } else {
-      log(out, 'Result: ' + JSON.stringify(r, null, 2));
+    log(out, 'CID verified.', 'dim');
+
+    // INVOKE-THEN-POLL. One action invocation broadcasts all settlement txs in a
+    // single HTTP-light run (it must stay under the Lit sandbox's ~24-call
+    // outbound budget) and returns optimistically. On-chain state is the source
+    // of truth, so we POLL the contract for Executed rather than trusting the
+    // action's return. We do NOT re-invoke while txs are still pending — a fresh
+    // invocation would compute higher nonces and double-send. Only re-invoke if
+    // a poll window stalls with no progress (e.g. a dropped tx).
+    const MAX_INVOCATIONS = 4;
+    let executed = false;
+    for (let inv = 1; inv <= MAX_INVOCATIONS && !executed; inv++) {
+      log(out, `Invoking Lit Action (attempt ${inv})…`, 'dim');
+      let r = null;
+      try {
+        const resp = await fetch(`${LIT_API_BASE}/core/v1/lit_action`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Api-Key': litKey },
+          body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS } }),
+        });
+        const raw = await resp.text();
+        if (resp.ok) {
+          const result = JSON.parse(raw);
+          r = typeof result.response === 'string' ? JSON.parse(result.response) : result.response;
+        } else {
+          log(out, `Action HTTP ${resp.status} — txs may still be broadcasting; confirming on-chain…`, 'dim');
+        }
+      } catch (e) {
+        log(out, `Action call interrupted (${e.message}) — txs run server-side; confirming on-chain…`, 'dim');
+      }
+
+      // Synchronous outcomes that polling won't resolve:
+      if (r && r.status === 'insufficient_funds') {
+        log(out, `=== INSUFFICIENT FUNDS (${r.leg}) ===`, 'warn');
+        log(out, `balance ${r.balance} / required ${r.required}`);
+        log(out, `Fund the ${r.leg} leg, then execute again.`);
+        renderFillLegs(await readSwap(swapId));
+        return;
+      }
+      if (r && r.status === 'error') { log(out, 'Action error: ' + (r.message || JSON.stringify(r)), 'error'); return; }
+      if (r && r.receiptSignature) log(out, 'Action returned a signed receipt; confirming on-chain…', 'dim');
+
+      // Poll the contract for Executed. markExecuted is the highest nonce, so
+      // once it mines every value transfer below it has necessarily mined too.
+      for (let p = 0; p < 24; p++) {
+        await sleep(2500);
+        s = await readSwap(swapId);
+        renderFillLegs(s);
+        if (s.state === 2) { executed = true; break; }
+        if (s.state === 3 || s.state === 4) { log(out, `Swap ${s.stateName}.`, 'warn'); return; }
+      }
+      if (!executed) log(out, 'Not Executed yet after polling; re-invoking to resume the remaining steps…', 'dim');
     }
-    renderFillLegs(await readSwap(swapId));
+
+    s = await readSwap(swapId);
+    renderFillLegs(s);
+    if (s.state === 2) {
+      log(out, '=== SWAP EXECUTED ===', 'success');
+      log(out, 'Source tx (your receipt): ' + s.sourceLegTxHash);
+      log(out, 'Dest tx (paid to user): ' + s.destLegTxHash);
+    } else {
+      log(out, `Swap still ${s.stateName} after ${MAX_INVOCATIONS} invocations — check funding/RPC and try again.`, 'warn');
+    }
   } catch (err) { log(out, 'Error: ' + err.message, 'error'); console.error(err); }
 }
 
