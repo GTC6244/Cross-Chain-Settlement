@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settled — Explorer</title>
+  <script>(function(){try{var t=localStorage.getItem('theme')||(window.matchMedia&&matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="settled.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot" aria-hidden="true"></span> Settled <span class="role-tag">Explore</span></h1>
+  <div class="bar-right">
+    <a class="theme-toggle" href="index.html" style="text-decoration:none">Send</a>
+    <a class="theme-toggle" href="solver.html" style="text-decoration:none">Solve</a>
+    <button class="theme-toggle" id="theme-btn" aria-label="Toggle color theme">◐ <span id="theme-label">Dark</span></button>
+  </div>
+</header>
+
+<main class="pro">
+  <div class="hero">
+    <h2>Every swap, in the open. <em>Read-only by design.</em></h2>
+    <p>The on-chain record for each settlement — state, the four role addresses, deposit addresses, both legs, fee, and the Lit Action that custodied it. No wallet, no writes; just the contract's truth.</p>
+  </div>
+
+  <div class="explore-bar">
+    <div class="meta">
+      <span><span class="k" id="swap-count">—</span> swaps</span>
+      <span>Contract <span class="addr" id="contract-addr">—</span></span>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" id="jump-id" placeholder="Jump to #" min="0" style="width:120px;margin:0">
+      <button class="btn btn-ghost" id="refresh-btn" style="width:auto;margin:0;padding:8px 14px;min-height:40px">Refresh</button>
+    </div>
+  </div>
+
+  <div id="explore-banner"></div>
+
+  <div class="ledger explore" id="explore-ledger">
+    <div class="ledger-head">
+      <div>ID</div><div>Pair</div><div>State</div><div class="num">Source sends</div><div class="num">Dest receives</div><div class="num">Fee</div>
+    </div>
+    <div id="explore-rows"></div>
+  </div>
+
+  <div class="empty-state" id="explore-empty" style="display:none">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+    <p>No swaps yet. Once a solver fills an intent, every swap shows up here with its full on-chain record.</p>
+  </div>
+</main>
+
+<script type="module" src="explorer-app.js"></script>
+</body>
+</html>

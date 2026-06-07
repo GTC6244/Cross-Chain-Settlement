@@ -106,3 +106,4 @@ Three voices, clear roles. Sans says "for you," mono says "this is the exact val
 | 2026-06-05 | Split into user + solver apps | /plan-design-review for the two-sided market. Same tokens; solver gets pro density (960px) + ledger rows. |
 | 2026-06-05 | Order book = warm ledger rows, not a data grid | DESIGN.md already reserves mono + tabular-nums for amounts; a disciplined ledger stays on-brand. No zebra/grid chrome. |
 | 2026-06-05 | Deliberate "Fund this quote" (never auto) | Moving real value is always a conscious act; best quote pre-highlighted but the user taps to commit. |
+| 2026-06-07 | Read-only Explorer (`app/explorer.html`) | Third view surfacing every swap's full on-chain record. Reuses existing tokens at pro density (960px) + the ledger pattern with a per-row detail panel. No new design decisions; no write actions. |
