@@ -19,8 +19,8 @@ Eleven pairs across EVM, Bitcoin, Litecoin, Dogecoin, Zcash (transparent), and S
 
 | Pair | Signing | Verification status | Action file |
 |------|---------|---------------------|-------------|
-| EVM <> EVM | micro-eth-signer | settlement logic tested | `app/actions/evm-evm-action.js` |
-| EVM <> Bitcoin | micro-eth-signer + @scure/btc-signer | needs testnet | `app/actions/evm-btc-action.js` |
+| EVM <> EVM | micro-eth-signer | **verified live (Base mainnet)** | `app/actions/evm-evm-action.js` |
+| EVM <> Bitcoin | micro-eth-signer + @scure/btc-signer | **verified live (Base mainnet ↔ signet)** | `app/actions/evm-btc-action.js` |
 | EVM <> Zcash | micro-eth-signer + ZIP-243 shim | ZIP-243 verified (regtest); needs live provider | `app/actions/evm-zec-action.js` |
 | Bitcoin <> Zcash | @scure/btc-signer + ZIP-243 shim | ZIP-243 verified (regtest); needs live provider | `app/actions/btc-zec-action.js` |
 | Bitcoin <> Litecoin | @scure/btc-signer | needs testnet | `app/actions/btc-ltc-action.js` |
@@ -31,7 +31,7 @@ Eleven pairs across EVM, Bitcoin, Litecoin, Dogecoin, Zcash (transparent), and S
 | Zcash <> Litecoin | ZIP-243 shim + @scure/btc-signer | ZIP-243 verified (regtest); needs live provider | `app/actions/zec-ltc-action.js` |
 | Zcash <> Dogecoin | ZIP-243 shim + @scure/btc-signer | ZIP-243 verified (regtest); needs live provider | `app/actions/zec-doge-action.js` |
 
-The chain-agnostic settlement state machine (`runSwap`) is exercised by `test/engine.test.js`. The in-sandbox signing/broadcast for each chain runs only in the Lit runtime and requires live-testnet verification before production use.
+The chain-agnostic settlement state machine (`runSwap`) is exercised by `test/engine.test.js`. The in-sandbox signing/broadcast runs only in the Lit runtime: **EVM↔EVM (Base mainnet) and EVM↔Bitcoin (signet) are now verified live end to end**, and `derive` mode (deposit-address generation) is verified live for all 11 pairs. The remaining settle paths (Litecoin, Dogecoin, Zcash, Solana) still need live verification before production use.
 
 ## Architecture
 
@@ -97,7 +97,9 @@ RE-EXECUTION:
 - Can't settle legs on an already-executed swap (`"invalid state"`)
 - Only the Lit Action's address can call any settlement function (`"not lit action"`)
 
-**Crash hardening:** every EVM transaction (the Base contract writes and EVM value transfers) is awaited to inclusion (`waitForTransaction`) and throws on revert, so the state machine never advances on an unmined tx. The fee is logged on-chain (`markFeeSettled`) independently of the legs, so a crash between a leg settling and the fee being paid is recovered on re-execution. If an expiry refund's drains hard-fail (e.g. RPC down), the swap is left `Created` (status `refund_incomplete`) rather than finalized, so funds are never stranded in a terminal `Refunded` state.
+**One step per invocation + the HTTP budget.** The Lit sandbox caps an action's outbound HTTP calls per run (~24), so the action does **one settlement step per invocation** (settle a leg, pay the fee, or finalize) and returns; the caller re-invokes until the swap is executed. Each step is idempotent — the action reads the on-chain leg/fee/state flags at the top of every run and skips anything already done — so a crash, timeout, or sandbox kill mid-swap is recovered by the next invocation. Before settling either leg it checks that BOTH deposits are funded, so it never pays one side when the other can't be.
+
+**Crash hardening:** the EVM signer broadcasts without waiting for each receipt (per-tx polling would blow the HTTP budget). Correctness comes from nonce ordering instead: the finalize transaction can't be mined until every value transfer before it has, and plain value transfers from a funded account can't revert. The fee is logged on-chain (`markFeeSettled`) independently of the legs, so a crash between a leg settling and the fee being paid is recovered on re-execution. If an expiry refund's drains hard-fail (e.g. RPC down), the swap is left `Created` (status `refund_incomplete`) rather than finalized, so funds are never stranded in a terminal `Refunded` state.
 
 The contract stores the tx hash for each leg, making every settlement step auditable.
 
@@ -137,7 +139,7 @@ The browser talks directly to Base RPC, the Lit Chipotle API, and the user's wal
 contracts/
   src/SwapContract.sol    # Swap state machine on Base
   script/Deploy.s.sol     # Foundry deploy script
-  test/SwapContract.t.sol # 51 Foundry tests
+  test/SwapContract.t.sol # 53 Foundry tests
 ```
 
 State machine: `Created -> Executed | Refunded` (unchanged by the two-sided work).
@@ -156,7 +158,7 @@ Supports native tokens and ERC-20 (token address fields, `address(0)` = native).
 
 ## Lit Actions
 
-Each action is assembled (per swap, with salt injection → unique CID → unique key → unique deposit addresses) from a set of shared snippet generators, then deployed to IPFS and run inside Lit's Deno sandbox.
+Each action is assembled (per swap, with salt injection → unique CID → unique key → unique deposit addresses) from a set of shared snippet generators and run inside Lit's Deno sandbox. The CID is derived from the assembled code (so the key/addresses are bound to the exact audited code); current testing runs the code directly against the Lit test environment, and pinning each template to IPFS is the production publishing step.
 
 ```
 app/actions/
@@ -184,7 +186,7 @@ All signing uses Paul Miller's audited, pure-JS, zero-dependency [noble/scure/mi
 - **`micro-sol-signer`** — Solana, using the action's 32-byte key as an Ed25519 seed (same secret as the secp256k1 side, different address — no dependency on Lit's roadmap Ed25519 signing)
 - **`@noble/hashes` + `@noble/curves` + `@scure/base`** — the Zcash ZIP-243 transparent sighash shim (BLAKE2b + secp256k1 + base58check), since no library does Zcash sighash natively
 
-All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "execute"` runs the full lifecycle with per-leg idempotency.
+All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "execute"` advances the swap by one idempotent step per invocation (settle a leg / pay fee / finalize). The caller invokes, waits for the step to land on-chain, and invokes again until the swap reads `Executed` — re-invoking while a step is still pending would recompute nonces and double-send.
 
 **Security:** actions read ALL params from the on-chain contract. Only `swapId`, `baseRpcUrl`, and `contractAddress` are passed via `js_params`.
 
@@ -215,21 +217,21 @@ All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "
 ## Testing
 
 ```bash
-# Solidity (51 tests)
+# Solidity (53 tests)
 cd contracts && forge test
 
-# Lit Action + browser-core logic (66 tests, Node 22+)
+# Lit Action + browser-core logic (71 tests, Node 22+)
 node test/engine.test.js          # real runSwap state machine, mock legs (22)
 node test/utxo-math.test.js       # coin selection / fee math (14)
 node test/evm-evm-action.test.js  # settlement flow (9)
 node test/evm-btc-action.test.js  # settlement flow (8)
-node test/lib.test.js             # browser shared-core pure helpers (13)
+node test/lib.test.js             # browser shared-core pure helpers (18)
 
 # Assemble + syntax-check all 11 action templates
 node test/_gen.mjs && for f in /tmp/genactions/*.mjs; do node --check "$f"; done
 ```
 
-`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy, including the four-address settle/refund mapping and the dest-floor assert. `test/lib.test.js` covers the browser shared core (`app/lib/*`) pure helpers: random salt, template dispatch, deposit picking, order-book paging, quote group/sort, CID compare. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions (including the Zcash ZIP-317 fee math). Most in-sandbox crypto (the BTC/LTC/DOGE/SOL signers) runs only in the Lit runtime and still needs live-testnet verification. Contract tests cover the full intent → fill → per-leg settlement lifecycle.
+`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy, including the four-address settle/refund mapping and the dest-floor assert. `test/lib.test.js` covers the browser shared core (`app/lib/*`) pure helpers: random salt, template dispatch, deposit picking, order-book paging, quote group/sort, CID compare. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions (including the Zcash ZIP-317 fee math). The EVM and Bitcoin signers are now verified live (EVM↔EVM on Base mainnet, EVM↔BTC on signet); the LTC/DOGE/SOL signers run only in the Lit runtime and still need live verification. Contract tests cover the full intent → fill → per-leg settlement lifecycle.
 
 The **Zcash ZIP-243 shim** — the highest-risk hand-rolled crypto — has been verified end-to-end against a local `zcashd` regtest node: the exact shipped `zecLegSrc()` builds and signs a transaction that zcashd's consensus engine accepts and mines (on both a Canopy and a NU6 chain). That harness, the findings, and a one-command reproduction live in `.context/zec-verify/`. Two bugs it surfaced (a stale hardcoded consensus branch id and a sub-ZIP-317 fee) are fixed.
 
@@ -239,12 +241,14 @@ The **Zcash ZIP-243 shim** — the highest-risk hand-rolled crypto — has been 
 
 The web app is static HTML + JS with no build step. No Node.js required to run it.
 
+The contract is currently deployed on **Base mainnet** at `0xC0a9c217e643DbdF1b6195a18C0802a1231507A1` (already wired into `app/lib/contract.js`). To deploy your own:
+
 ```bash
-# Deploy contract to Base Sepolia
+# Deploy contract to Base mainnet (the contract is cheap + redeployable; no state migration)
 cd contracts
 forge install foundry-rs/forge-std
 forge test
-PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url https://sepolia.base.org --broadcast
+PRIVATE_KEY=0x... forge script script/Deploy.s.sol --rpc-url https://mainnet.base.org --broadcast
 
 # Run the web app (any static file server works)
 cd app && python3 -m http.server 8899
@@ -252,7 +256,7 @@ cd app && python3 -m http.server 8899
 # Solver app: http://localhost:8899/solver.html
 ```
 
-After deployment, set `CONTRACT_ADDRESS` (and `CONTRACT_DEPLOY_BLOCK`, so the order-book
+After deploying, set `CONTRACT_ADDRESS` (and `CONTRACT_DEPLOY_BLOCK`, so the order-book
 scan starts at deploy rather than genesis) in `app/lib/contract.js` — the script prints both.
 
 **For running tests only** (optional): Node.js 22+ (ESM auto-detection). The engine and UTXO-math tests use only Node built-ins; the older harness-based tests import `ethers`.

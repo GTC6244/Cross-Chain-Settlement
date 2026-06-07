@@ -18,6 +18,13 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   can't be bricked or misrouted by a missing address (audit L-2).
 
 ### Added
+- **First real cross-chain swaps, settled live.** An EVM↔EVM swap on Base mainnet
+  and an EVM↔Bitcoin swap (Base mainnet ↔ signet) both ran end to end through the
+  Lit Action: both legs settled on-chain, fee paid, swap marked executed, and a
+  signed receipt returned. The Bitcoin leg broadcast a real, valid signet
+  transaction — the first live exercise of the `@scure/btc-signer` path.
+- The contract is deployed on **Base mainnet** (`0xC0a9c217e643DbdF1b6195a18C0802a1231507A1`),
+  with `CONTRACT_ADDRESS` + `CONTRACT_DEPLOY_BLOCK` wired into `app/lib/contract.js`.
 - Two-sided market. Post a swap as an *intent* (what you'll send, the minimum
   you'll accept) and let solvers compete to fill it. You compare their quotes and
   fund the best one — nothing is escrowed until you choose.
@@ -44,6 +51,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Design-system rule in `CLAUDE.md` (read `DESIGN.md` before any UI change).
 
 ### Changed
+- The Lit Action now settles **one step per invocation** (settle a leg, pay the
+  fee, or finalize) and returns until the swap is fully executed. This keeps each
+  run within the Lit sandbox's outbound-HTTP budget, which a cross-chain swap (with
+  a Bitcoin leg's extra API calls) would otherwise blow. The execute flow in the
+  solver app is now "invoke, watch the contract, invoke again until executed."
+- The EVM signer no longer waits for each transaction's receipt inside the action.
+  Safety comes from nonce ordering instead — the finalize transaction can't be
+  mined until every value transfer before it has — which is both faster and
+  cheaper on outbound calls.
 - Split the single-page app into two role-scoped apps (`index.html` user,
   `solver.html` solver) sharing one design system (`app/settled.css`) and one
   shared ES-module core (`app/lib/*`). The user app is now Announce → Quotes →
@@ -68,6 +84,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `swap-engine.js`. (May return in the role-scoped apps later.)
 
 ### Fixed
+- Three bugs that only surfaced when the action first ran live against a real Lit
+  node (the unit tests run a simplified copy, so they couldn't catch these):
+  derive mode crashed before returning deposit addresses; every Bitcoin-family
+  pair failed because of a renamed library call (`@scure/btc-signer` dropped
+  `utils.pubECDSA`); and EVM value transfers were rejected by the signer over a
+  stray `undefined` field. All three would have broken the live apps, not just a test.
 - **Latent cross-chain fund-loss bug.** The contract stored only two refund-address
   slots, which the engine used on opposite chains for settle vs refund — safe only in
   the EVM↔EVM demo where one wallet owned every role. A real cross-family swap would
