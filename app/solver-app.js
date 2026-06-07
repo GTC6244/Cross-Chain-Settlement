@@ -240,17 +240,18 @@ async function executeSwap() {
     if (computed !== s.litActionCid) { log(out, 'CID mismatch — refusing to execute.', 'error'); return; }
     log(out, 'CID verified.', 'dim');
 
-    // INVOKE-THEN-POLL. One action invocation broadcasts all settlement txs in a
-    // single HTTP-light run (it must stay under the Lit sandbox's ~24-call
-    // outbound budget) and returns optimistically. On-chain state is the source
-    // of truth, so we POLL the contract for Executed rather than trusting the
-    // action's return. We do NOT re-invoke while txs are still pending — a fresh
-    // invocation would compute higher nonces and double-send. Only re-invoke if
-    // a poll window stalls with no progress (e.g. a dropped tx).
-    const MAX_INVOCATIONS = 4;
+    // STEP LOOP. The action performs ONE settlement step per invocation (settle
+    // a leg / pay fee / finalize) to stay under the Lit sandbox's ~24-call
+    // outbound HTTP budget, returning "in_progress" until finalized. We re-invoke
+    // after each step, but only once the step is REFLECTED on-chain (its mark tx
+    // mined) — re-invoking while a mark is still pending would read stale state
+    // and recompute nonces. On-chain state is the source of truth.
+    const fingerprint = (sw) => `${sw.state}|${sw.sourceLegSettled}|${sw.destLegSettled}|${sw.sourceLegTxHash}|${sw.destLegTxHash}`;
+    const MAX_STEPS = 8;
     let executed = false;
-    for (let inv = 1; inv <= MAX_INVOCATIONS && !executed; inv++) {
-      log(out, `Invoking Lit Action (attempt ${inv})…`, 'dim');
+    for (let step = 1; step <= MAX_STEPS && !executed; step++) {
+      const before = fingerprint(s);
+      log(out, `Step ${step}: invoking Lit Action…`, 'dim');
       let r = null;
       try {
         const resp = await fetch(`${LIT_API_BASE}/core/v1/lit_action`, {
@@ -262,11 +263,12 @@ async function executeSwap() {
         if (resp.ok) {
           const result = JSON.parse(raw);
           r = typeof result.response === 'string' ? JSON.parse(result.response) : result.response;
+          if (r && r.step) log(out, `  action: ${r.status} (${r.step})`, 'dim');
         } else {
-          log(out, `Action HTTP ${resp.status} — txs may still be broadcasting; confirming on-chain…`, 'dim');
+          log(out, `  action HTTP ${resp.status} — step may still be landing; confirming on-chain…`, 'dim');
         }
       } catch (e) {
-        log(out, `Action call interrupted (${e.message}) — txs run server-side; confirming on-chain…`, 'dim');
+        log(out, `  action call interrupted (${e.message}) — step runs server-side; confirming on-chain…`, 'dim');
       }
 
       // Synchronous outcomes that polling won't resolve:
@@ -278,18 +280,18 @@ async function executeSwap() {
         return;
       }
       if (r && r.status === 'error') { log(out, 'Action error: ' + (r.message || JSON.stringify(r)), 'error'); return; }
-      if (r && r.receiptSignature) log(out, 'Action returned a signed receipt; confirming on-chain…', 'dim');
 
-      // Poll the contract for Executed. markExecuted is the highest nonce, so
-      // once it mines every value transfer below it has necessarily mined too.
-      for (let p = 0; p < 24; p++) {
+      // Wait for the step to land on-chain (state/legs change), then re-invoke
+      // the next step. markExecuted is the highest nonce, so Executed implies
+      // every value transfer below it has mined.
+      for (let p = 0; p < 16; p++) {
         await sleep(2500);
         s = await readSwap(swapId);
         renderFillLegs(s);
         if (s.state === 2) { executed = true; break; }
         if (s.state === 3 || s.state === 4) { log(out, `Swap ${s.stateName}.`, 'warn'); return; }
+        if (fingerprint(s) !== before) break; // step landed; advance to next
       }
-      if (!executed) log(out, 'Not Executed yet after polling; re-invoking to resume the remaining steps…', 'dim');
     }
 
     s = await readSwap(swapId);

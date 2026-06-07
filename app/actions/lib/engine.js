@@ -317,113 +317,99 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
     return { status: "error", message: "destAmount below floor (" + destAmount.toString() + " < " + minDestAmount.toString() + ")" };
   }
 
-  // ---- balance checks for unsettled legs ----
-  if (!sourceLegSettled) {
-    var sb = await sourceLeg.getBalance(depositSource);
-    if (sb < sourceAmount) return { status: "insufficient_funds", leg: "source",
-      balance: sb.toString(), required: sourceAmount.toString(), destLegSettled: destLegSettled };
-  }
-  if (!destLegSettled) {
-    var db = await destLeg.getBalance(depositDest);
-    if (db < destAmount) return { status: "insufficient_funds", leg: "dest",
-      balance: db.toString(), required: destAmount.toString(), sourceLegSettled: sourceLegSettled };
-  }
-
   // ---- fee math (rear-loaded, basis points on the fee leg's amount) ----
   var fee = (CFG.feeLeg === "source" ? sourceAmount : destAmount) * feeBps / 10000n;
   var sourceNet = sourceAmount - (CFG.feeLeg === "source" ? fee : 0n);
   var destNet = destAmount - (CFG.feeLeg === "dest" ? fee : 0n);
 
-  var result = {
-    status: "executed",
-    sourceLegSettled: sourceLegSettled,
-    destLegSettled: destLegSettled,
-    resumed: sourceLegSettled || destLegSettled,
-  };
+  // ---- ONE STEP PER INVOCATION -------------------------------------------
+  // Each invocation performs at most ONE settlement step (settle a leg, pay the
+  // fee, or finalize) then returns. This bounds outbound HTTP per run well under
+  // the Lit sandbox's ~24-call cap -- REQUIRED once legs add API calls (UTXO
+  // fetch/feerate/broadcast for BTC/LTC/DOGE; RPC for EVM), and harmless for
+  // EVM<>EVM. The caller re-invokes until status === "executed"; the top-level
+  // on-chain reads above make each step idempotent (a settled leg / Executed
+  // state is skipped on the next run). Balance is checked only for the leg being
+  // settled this run, to save calls. Settlement cross: source-chain funds pay
+  // the solver (solverReceiveSource); dest-chain funds pay the user (userReceiveDest).
 
-  // Settlement cross: source-chain funds pay the solver (solverReceiveSource);
-  // dest-chain funds pay the user (userReceiveDest).
-  async function settleSource() {
-    if (!sourceLegSettled) {
-      var txid = await sourceLeg.settle({ to: solverReceiveSource, amount: sourceNet, deposit: depositSource });
-      result.sourceTxId = txid;
-      await base.markLegSettled(true, txid);
-      sourceLegSettled = true;
-    } else { result.sourceTxId = legs[2]; result.sourceSkipped = true; }
+  // SAFETY: never settle ANY leg until BOTH legs are funded (or already
+  // settled). Checking only the leg about to settle would let us pay one side
+  // while the other can't be funded -- a one-sided settlement. So verify every
+  // unsettled leg's balance up front, before broadcasting anything.
+  if (!sourceLegSettled) {
+    var sbal = await sourceLeg.getBalance(depositSource);
+    if (sbal < sourceAmount) return { status: "insufficient_funds", leg: "source",
+      balance: sbal.toString(), required: sourceAmount.toString() };
   }
-  async function settleDest() {
-    if (!destLegSettled) {
-      var txid = await destLeg.settle({ to: userReceiveDest, amount: destNet, deposit: depositDest });
-      result.destTxId = txid;
-      await base.markLegSettled(false, txid);
-      destLegSettled = true;
-    } else { result.destTxId = legs[3]; result.destSkipped = true; }
+  if (!destLegSettled) {
+    var dbal = await destLeg.getBalance(depositDest);
+    if (dbal < destAmount) return { status: "insufficient_funds", leg: "dest",
+      balance: dbal.toString(), required: destAmount.toString() };
   }
 
+  // step 1: settle the next unsettled leg, honoring CFG.settleOrder.
   for (var i = 0; i < CFG.settleOrder.length; i++) {
-    if (CFG.settleOrder[i] === "source") await settleSource(); else await settleDest();
+    var side = CFG.settleOrder[i];
+    if (side === "source" && !sourceLegSettled) {
+      var stx = await sourceLeg.settle({ to: solverReceiveSource, amount: sourceNet, deposit: depositSource });
+      await base.markLegSettled(true, stx);
+      return { status: "in_progress", step: "settle-source", sourceTxId: stx };
+    }
+    if (side === "dest" && !destLegSettled) {
+      var dtx = await destLeg.settle({ to: userReceiveDest, amount: destNet, deposit: depositDest });
+      await base.markLegSettled(false, dtx);
+      return { status: "in_progress", step: "settle-dest", destTxId: dtx };
+    }
   }
 
-  // ---- fee step (idempotent + recoverable) ----
-  // Decoupled from leg settlement and keyed on the on-chain feeSettled flag, so
-  // a crash between a leg settling and the fee being paid is recovered on the
-  // next run instead of silently dropping the fee.
+  // step 2: pay the fee (idempotent on the on-chain feeSettled flag).
   if (CFG.feeMode === "send-evm" && fee > 0n) {
     var feeStatus = await base.getFeeStatus(); // [feeSettled, feeTxHash]
-    if (feeStatus[0]) {
-      result.feeTxId = feeStatus[1];
-      result.feeSkipped = true;
-    } else {
+    if (!feeStatus[0]) {
       var feeLeg = CFG.feeLeg === "source" ? sourceLeg : destLeg;
       var feeDeposit = CFG.feeLeg === "source" ? depositSource : depositDest;
       if (feeLeg.sendFee) {
-        var feeTx = await feeLeg.sendFee({ to: owner, amount: fee, deposit: feeDeposit });
-        result.feeTxId = feeTx;
-        await base.markFeeSettled(feeTx);
+        var ftx = await feeLeg.sendFee({ to: owner, amount: fee, deposit: feeDeposit });
+        await base.markFeeSettled(ftx);
+        return { status: "in_progress", step: "fee", feeTxId: ftx };
       }
     }
-  } else if (CFG.feeMode === "retain" && fee > 0n) {
-    result.feeRetained = fee.toString();
-    result.feeNote = "Fee retained in action wallet for batch collection (no EVM payout leg)";
   }
 
-  // ---- sweep excess deposits back to depositors ----
-  // Each leg returns its overfunded remainder to its refund address. The fee
-  // leg is skipped when fees are retained (no EVM payout), so the fee stays in
-  // the action wallet for batch collection. UTXO drains naturally no-op right
-  // after settle (the spent/change outputs aren't confirmed yet); the EVM drain
-  // is best-effort and only catches excess once the settle tx is mined.
+  // step 3: best-effort sweep of overfunded UTXO/ZEC deposits (no-op + cheap, so
+  // folded into the finalize run). EVM legs are NEVER swept: settle() already
+  // sent the exact net from this same account, and drain() would re-send the
+  // still-unmined balance (double-spend / nonce wedge); EVM overfunding is
+  // recovered via the expiry refund path. UTXO/ZEC drains only spend CONFIRMED
+  // utxos, so the just-broadcast change is invisible and the drain no-ops.
   async function sweepLeg(leg, depositAddr, refundAddr, isFeeLeg) {
-    if (isFeeLeg && CFG.feeMode === "retain") return;
-    // Never sweep an EVM (account-model) leg after settlement: settle() already
-    // sent the exact net amount from this same address, and drain() reads the
-    // (likely still-unmined) balance and would re-send nearly all of it ->
-    // double-spend / nonce wedge. EVM overfunding is recovered via the expiry
-    // refund path instead. UTXO/ZEC legs are safe (drain only spends confirmed
-    // UTXOs, so the just-broadcast change is invisible and drain no-ops).
     if (leg.label === "evm") return;
-    try { var s = await leg.drain({ to: refundAddr, deposit: depositAddr }); if (s) result[leg.role + "Sweep"] = s; }
-    catch (e) { result[leg.role + "SweepNote"] = String(e.message || e); }
+    if (isFeeLeg && CFG.feeMode === "retain") return;
+    try { await leg.drain({ to: refundAddr, deposit: depositAddr }); } catch (e) {}
   }
   await sweepLeg(sourceLeg, depositSource, userRefundSource, CFG.feeLeg === "source");
   await sweepLeg(destLeg, depositDest, solverRefundDest, CFG.feeLeg === "dest");
 
-  // ---- mark fully executed (contract enforces both legs settled) ----
+  // step 4: finalize (contract enforces both legs settled).
   await base.markExecuted();
 
   // ---- signed receipt (EIP-191 via micro-eth-signer) ----
-  // Receipt must be byte-identical across every Lit node so the threshold
-  // signature aggregates. Do NOT put Date.now() here — use the deterministic
-  // on-chain expiration. (Tx hashes are read from contract/leg results, which
-  // are also deterministic once both legs are settled.)
+  // Byte-identical across Lit nodes (threshold sig). Do NOT put Date.now() here.
+  // Tx hashes come from the on-chain leg records, set when each leg was marked.
   var receipt = JSON.stringify({
-    swapId: params.swapId, sourceTx: result.sourceTxId, destTx: result.destTxId,
+    swapId: params.swapId, sourceTx: legs[2], destTx: legs[3],
     sourceAmount: sourceAmount.toString(), destAmount: destAmount.toString(),
-    fee: fee.toString(), resumed: result.resumed, expiration: expirationTs,
+    fee: fee.toString(), expiration: expirationTs,
   });
-  result.receipt = receipt;
-  result.receiptSignature = eip191Signer.sign(receipt, ctx.keyBytes);
-  return result;
+  return {
+    status: "executed",
+    sourceLegSettled: true, destLegSettled: true,
+    sourceTxId: legs[2], destTxId: legs[3],
+    feeRetained: (CFG.feeMode === "retain" && fee > 0n) ? fee.toString() : undefined,
+    receipt: receipt,
+    receiptSignature: eip191Signer.sign(receipt, ctx.keyBytes),
+  };
 }
 `;
 }
