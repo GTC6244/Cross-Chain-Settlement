@@ -6,6 +6,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- The published Lit Action no longer carries any RPC API key. The leg RPC is now
+  injected at runtime via a `legRpcUrls` param (chain → url), and the endpoint
+  baked into the action code is a key-free public node — so the action's IPFS
+  CID, which anyone can read, exposes no secret. (A keyed endpoint had been
+  embedded in `networks.js` and serialized into the action.)
 - Before you fund a solver's quote, the app now derives the deposit address from
   the swap's audited code (via your Lit key) and confirms it matches the on-chain
   address — a green "code verified" badge alone is no longer enough to fund. Closes
@@ -16,6 +21,15 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   fund on any mismatch (audit H-2).
 - The contract rejects empty role/deposit address strings in `createSwap`, so a swap
   can't be bricked or misrouted by a missing address (audit L-2).
+- A swap with a Bitcoin/Litecoin/Dogecoin/Zcash leg is no longer marked executed
+  the instant its payout broadcasts. The settlement now waits for that
+  transaction to reach the swap's required confirmation depth before finalizing,
+  so a payout that never confirms can't leave the swap recorded as complete.
+  (EVM legs were already safe — their nonce ordering guarantees finalize can't
+  land before the transfers.) If the explorer can't be reached, finalize waits
+  rather than assuming success. Re-org protection scales with the configured
+  confirmation depth; the depth is per-swap (see TODOS for raising the default
+  past one confirmation on UTXO chains before mainnet use).
 
 ### Added
 - **First real cross-chain swaps, settled live.** An EVM↔EVM swap on Base mainnet

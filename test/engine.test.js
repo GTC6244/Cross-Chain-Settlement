@@ -65,7 +65,7 @@ function mockBase(o = {}) {
       getSwapAddresses: async () => [
         'source-chain', 'dest-chain',
         USER_REFUND_SRC, USER_RECV_DST, SOLVER_RECV_SRC, SOLVER_REFUND_DST,
-        DEP_SRC, DEP_DST, 1,
+        DEP_SRC, DEP_DST, o.confirmationBlocks ?? 1,
       ],
       // minDestAmount defaults to '1' so existing tests never trip the floor;
       // the floor test overrides it.
@@ -361,6 +361,65 @@ await test('destAmount below floor -> error, no writes, no settle', async () => 
 await test('destAmount at floor -> settles normally', async () => {
   const base = mockBase({ destAmount: '500000', minDestAmount: '500000', feeBps: 0 });
   const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
+});
+
+// ---- confirmation gate (UTXO/ZEC legs) ----
+// EVM legs are safe via nonce ordering and expose no confirmations(); UTXO/ZEC
+// legs must reach confirmationBlocks depth before the terminal markExecuted.
+// (mockLeg has no confirmations() -> the prior tests exercise the EVM-style
+// skip path and finalize despite confirmationBlocks=1.)
+const SETTLED_FEE_DONE = { sourceLegSettled: true, sourceLegTx: 'a', destLegSettled: true, destLegTx: 'b', feeSettled: true, feeTxHash: 'f' };
+
+await test('confirmation gate: unconfirmed UTXO leg -> awaiting_confirmations, no finalize', async () => {
+  const base = mockBase(SETTLED_FEE_DONE);
+  const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  dst.chainName = 'bitcoin-signet';
+  dst.confirmations = async () => 0;                       // broadcast, not yet mined
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'awaiting_confirmations');
+  assert.equal(r.leg, 'dest');
+  assert.equal(r.chain, 'bitcoin-signet');
+  assert.equal(r.txid, 'b');
+  assert.equal(r.required, 1);
+  assert.equal(r.confirmations, 0);
+  assert.equal(base.calls.filter(c => c.type === 'markExecuted').length, 0, 'must not finalize before confirmation');
+});
+
+await test('confirmation gate: confirmed UTXO leg -> finalizes', async () => {
+  const base = mockBase(SETTLED_FEE_DONE);
+  const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  dst.confirmations = async (txid) => { assert.equal(txid, 'b'); return 1; };
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
+  assert.ok(base.calls.some(c => c.type === 'markExecuted'));
+});
+
+await test('confirmation gate: confirmations() throwing defers finalize (fail-closed)', async () => {
+  const base = mockBase(SETTLED_FEE_DONE);
+  const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  dst.confirmations = async () => { throw new Error('explorer 503'); };
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'awaiting_confirmations');
+  assert.equal(r.confirmations, 0);
+  assert.equal(base.calls.filter(c => c.type === 'markExecuted').length, 0);
+});
+
+await test('confirmation gate disabled when confirmationBlocks=0', async () => {
+  const base = mockBase({ ...SETTLED_FEE_DONE, confirmationBlocks: 0 });
+  const src = mockLeg('evm', 'source'), dst = mockLeg('btc', 'dest');
+  let queried = false;
+  dst.confirmations = async () => { queried = true; return 0; };
+  const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
+  assert.equal(r.status, 'executed');
+  assert.equal(queried, false, 'gate must not query confirmations when disabled');
+});
+
+await test('confirmation gate: EVM leg (no confirmations()) does not block finalize', async () => {
+  const base = mockBase(SETTLED_FEE_DONE);
+  // Both legs EVM-style (no confirmations method); confirmationBlocks=1 default.
+  const src = mockLeg('evm', 'source'), dst = mockLeg('eth', 'dest');
   const r = await runToCompletion(ctx, { settleOrder: ['source', 'dest'], feeLeg: 'source', feeMode: 'send-evm' }, src, dst, base);
   assert.equal(r.status, 'executed');
 });

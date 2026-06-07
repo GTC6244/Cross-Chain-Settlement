@@ -203,7 +203,12 @@ function makeBaseWriter(ctx) {
 // ---- EVM leg factory ------------------------------------------------------
 function makeEvmLeg(ctx, chainId_, role) {
   var cfg = CHAINS[chainId_];
-  var rpcUrl = cfg.rpc;
+  // Prefer a runtime-injected RPC (params.legRpcUrls[chain]) over the key-free
+  // public default embedded in CHAINS. This keeps the published action CID free
+  // of any private/keyed endpoint while still letting the caller point a leg at
+  // a dedicated provider. Falls back to the embedded default when not injected.
+  var legRpcUrls = ctx.params.legRpcUrls || {};
+  var rpcUrl = legRpcUrls[chainId_] || cfg.rpc;
   var chainId = cfg.chainId;
   // Pin a static network so the provider never does an eth_chainId auto-detect
   // round-trip per call (that detect intermittently failed with "could not
@@ -285,6 +290,10 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
   var solverRefundDest = addrs[5];
   var depositSource = addrs[6];
   var depositDest = addrs[7];
+  // confirmationBlocks: min depth a leg's settlement tx must reach before we
+  // finalize. Honored by the confirmation gate below for legs that expose
+  // confirmations() (UTXO/ZEC). 0 disables the gate.
+  var confirmationBlocks = (addrs[8] != null) ? Number(addrs[8].toString()) : 0;
 
   var sourceLegSettled = legs[0];
   var destLegSettled = legs[1];
@@ -373,6 +382,36 @@ async function runSwap(ctx, CFG, sourceLeg, destLeg, baseOverride) {
         var ftx = await feeLeg.sendFee({ to: owner, amount: fee, deposit: feeDeposit });
         await base.markFeeSettled(ftx);
         return { status: "in_progress", step: "fee", feeTxId: ftx };
+      }
+    }
+  }
+
+  // step 2.5: CONFIRMATION GATE. Both legs are settled and the fee is paid by
+  // the time we reach here. EVM legs are safe to finalize immediately -- nonce
+  // ordering guarantees markExecuted (highest nonce) cannot mine before the
+  // value transfers below it -- and they expose no confirmations(), so they are
+  // skipped. UTXO/ZEC legs have NO such ordering: a just-broadcast settle tx can
+  // still be dropped or re-orged out of the mempool. So before the (terminal,
+  // signed) finalize, require each such leg's recorded settle tx to reach
+  // confirmationBlocks depth. confirmations() is fail-closed (0 on any lookup
+  // error), and a thrown error is caught to 0 here, so a flaky explorer DEFERS
+  // finalize rather than passing an unconfirmed payment through. A settle tx that
+  // never confirms leaves the swap Created until expiry, when the refund path
+  // returns the redeposited funds -- never a one-sided "executed".
+  if (confirmationBlocks > 0) {
+    var confLegs = [
+      { leg: sourceLeg, txid: legs[2], side: "source" },
+      { leg: destLeg,   txid: legs[3], side: "dest" },
+    ];
+    for (var ci = 0; ci < confLegs.length; ci++) {
+      var cl = confLegs[ci];
+      if (typeof cl.leg.confirmations !== "function" || !cl.txid) continue;
+      var conf;
+      try { conf = await cl.leg.confirmations(cl.txid); }
+      catch (e) { conf = 0; }
+      if (conf < confirmationBlocks) {
+        return { status: "awaiting_confirmations", leg: cl.side, chain: cl.leg.chainName,
+          txid: cl.txid, confirmations: conf, required: confirmationBlocks };
       }
     }
   }
