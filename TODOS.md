@@ -33,13 +33,14 @@ pair runs only in the Lit runtime and is not covered by the Node tests.
 - **Verify in-sandbox signing/broadcast on live for the remaining pairs**
   **Priority:** P1
   Done live (full settle path): EVM↔EVM (Base mainnet), EVM↔BTC (Base mainnet ↔
-  signet), EVM↔SOL (Base mainnet ↔ devnet, swap #13), and **EVM↔ZEC (Base
-  mainnet ↔ Zcash mainnet, swap #14, 2026-06-08)** — the ZEC transparent ZIP-243
-  signer is now proven on a live network, not just regtest. `derive` mode verified
-  live for all 11 pairs. Still need a live settle: the remaining Zcash pairs
-  (`btc-zec`, `zec-sol`, `zec-ltc`, `zec-doge`), the remaining Solana pairs
-  (`btc-sol`, `zec-sol`), and Bitcoin↔Litecoin / Bitcoin↔Dogecoin. (LTC/DOGE
-  reuse the proven BTC UTXO leg, so they're lower-risk.) Each needs BOTH legs'
+  signet), EVM↔SOL (Base mainnet ↔ Solana devnet — swap 13, 2026-06-07), and
+  **EVM↔ZEC (Base mainnet ↔ Zcash mainnet, swap #14, 2026-06-08)** — the ZEC
+  transparent ZIP-243 signer is now proven on a live network, not just regtest.
+  `derive` mode verified live for all 11 pairs. Still need a live settle: the
+  remaining Zcash pairs (`btc-zec`, `zec-sol`, `zec-ltc`, `zec-doge`), the
+  remaining Solana pairs (`btc-sol`, `zec-sol`), and Bitcoin↔Litecoin /
+  Bitcoin↔Dogecoin. (LTC/DOGE reuse the proven BTC UTXO leg, and btc-sol/zec-sol
+  reuse the now-proven SOL leg, so they're lower-risk.) Each needs BOTH legs'
   providers wired — and any ZEC leg needs the hybrid (see the Zcash item).
 
 - **Wire a live Zcash provider for the ZEC pairs**
@@ -104,7 +105,12 @@ pair runs only in the Lit runtime and is not covered by the Node tests.
 
 - **Solana devnet verification**
   **Priority:** P2
-  `evm-sol`, `btc-sol`, `zec-sol` are marked "needs devnet".
+  `evm-sol` is now VERIFIED LIVE (Base mainnet ↔ devnet, swap 13, 2026-06-07 —
+  settle + sweep + signed receipt, no funds stranded). `btc-sol` and `zec-sol`
+  still need a live run (same SOL leg, now proven; btc-sol is zero-mainnet-spend:
+  signet + devnet). Note: public devnet faucet was rate-limited/dry — funding the
+  action's SOL deposit needed an external airdrop (faucet.solana.com needs GitHub
+  auth).
 
 ## Web App (UI)
 

@@ -7,7 +7,7 @@
  * it binds only to the Base RPC through the shared read helpers in app/lib/*.
  */
 import {
-  CONTRACT_ADDRESS, STATE_NAMES, STATE_CLASSES, readContract, readSwap,
+  CONTRACT_ADDRESS, STATE_CLASSES, readContract, readSwap,
 } from './lib/contract.js';
 import { toggleTheme, initThemeLabel } from './lib/ui.js';
 
