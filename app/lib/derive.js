@@ -31,9 +31,10 @@ const EVM_FAMILY = Object.fromEntries(
 );
 
 export const CHAIN_FAMILY = {
+  // EVM mainnet + testnet (incl. Base, the contract host) derive from networks.js.
   ...EVM_FAMILY,
   'bitcoin-signet': 'btc', 'litecoin-testnet': 'ltc', 'dogecoin-testnet': 'doge',
-  'zcash-testnet': 'zec', 'solana-devnet': 'sol',
+  'zcash-testnet': 'zec', 'zcash-mainnet': 'zec', 'solana-devnet': 'sol',
 };
 
 // Family pair -> registered template key (direction-independent).
@@ -55,6 +56,28 @@ export const TEMPLATE_BY_FAMILIES = {
 export function templateKeyForChains(sourceChain, destChain) {
   const key = CHAIN_FAMILY[sourceChain] + ',' + CHAIN_FAMILY[destChain];
   return TEMPLATE_BY_FAMILIES[key];
+}
+
+// Confirmation depth a leg's settlement tx must reach before the engine
+// finalizes. The conf gate (engine runSwap) applies ONLY to legs that expose
+// confirmations() — UTXO + ZEC; EVM/SOL legs finalize immediately and ignore
+// this. Mainnet UTXO/ZEC need reorg protection; testnets are shallow (1 is fine
+// on signet/regtest-like nets). Per-chain values take precedence; the family
+// fallback covers any UTXO/ZEC *mainnet* chain added later.
+const CONF_BY_CHAIN = {
+  'zcash-mainnet': 5,
+  'zcash-testnet': 1, 'bitcoin-signet': 1, 'litecoin-testnet': 1, 'dogecoin-testnet': 1,
+};
+const CONF_BY_FAMILY = { btc: 4, ltc: 4, doge: 10, zec: 5 }; // mainnet defaults
+
+/**
+ * Chain-aware confirmationBlocks for a swap: the deepest requirement across its
+ * two legs, floored at 1 so the gate is never created disabled (0). EVM/SOL
+ * legs contribute 0 (no gate), so an all-EVM swap returns the floor of 1.
+ */
+export function confirmationBlocksFor(sourceChain, destChain) {
+  const depth = (c) => (c in CONF_BY_CHAIN ? CONF_BY_CHAIN[c] : (CONF_BY_FAMILY[CHAIN_FAMILY[c]] || 0));
+  return Math.max(1, depth(sourceChain), depth(destChain));
 }
 
 /** Build the action code string from the audited per-pair generator (browser only). */

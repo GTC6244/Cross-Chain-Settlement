@@ -168,6 +168,29 @@ input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); ou
 .deposit-info p { font-size: 13px; margin-bottom: 6px; }
 .deposit-info .addr { font-family: var(--mono); font-size: 12px; color: var(--accent-deep); word-break: break-all; }
 
+/* Market price quote (solver, advisory) */
+.price-quote { margin-top: 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
+.price-quote .pq-sub { text-transform: none; letter-spacing: 0; color: var(--text-dim); font-weight: 500; }
+.pq-loading { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-dim); }
+.pq-rows { display: flex; flex-direction: column; gap: 4px; }
+.pq-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.pq-row:last-child { border-bottom: 0; }
+.pq-row .pq-src { font-weight: 600; min-width: 104px; }
+.pq-row .pq-px { font-family: var(--mono); color: var(--text-dim); }
+.pq-row .pq-x { font-family: var(--mono); color: var(--accent-deep); margin-left: auto; }
+.pq-row.off .pq-err { color: var(--text-dim); font-style: italic; }
+.pq-fair { display: flex; flex-direction: column; gap: 2px; margin-top: 10px; padding: 10px 12px; background: var(--accent-soft); border-radius: var(--radius-sm); }
+.pq-fair-label { font-size: 12px; color: var(--text-dim); }
+.pq-fair-amt { font-family: var(--mono); font-size: 16px; font-weight: 600; color: var(--accent-deep); }
+.pq-fair-raw { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.pq-floor { margin-top: 8px; font-size: 12px; line-height: 1.5; }
+.pq-floor.pos { color: var(--success); }
+.pq-floor.neg { color: var(--error); }
+.pq-note { font-size: 12px; color: var(--text-dim); margin-top: 6px; }
+.quote-margin { margin-top: 8px; font-size: 12px; line-height: 1.5; }
+.quote-margin.pos { color: var(--success); }
+.quote-margin.neg { color: var(--error); }
+
 /* Trust panel */
 .trust { display: flex; gap: 12px; align-items: flex-start; margin-top: 20px; padding: 14px 16px; border: 1px dashed var(--border); border-radius: var(--radius-sm); }
 .trust .shield { color: var(--success); flex-shrink: 0; margin-top: 2px; }

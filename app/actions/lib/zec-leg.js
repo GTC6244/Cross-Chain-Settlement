@@ -117,12 +117,16 @@ function serializeV4(cfg, inputs, outputs, scriptSigs) {
   return cat.apply(null, parts);
 }
 
-// JSON-RPC call to a self-hosted zcashd node (cfg.api.style === "zcashd").
-// cfg.api.rpc is the node URL; cfg.api.rpcAuth is an optional Authorization
-// header value (e.g. "Basic " + base64("user:pass")).
+// JSON-RPC call to a zcashd-compatible node. Used by style "zcashd" (a
+// self-hosted node, cfg.api.rpc + optional Basic cfg.api.rpcAuth) AND by style
+// "tatum" (the Tatum RPC gateway, zcash-{net}.gateway.tatum.io, authed with an
+// x-api-key header via cfg.api.apiKey). Both speak the same getblockchaininfo /
+// getrawtransaction / sendrawtransaction surface; only UTXO listing differs
+// (Tatum has no address index on the node — see zecFetchUtxos).
 async function zecRpc(cfg, method, params) {
   var headers = { "Content-Type": "application/json" };
   if (cfg.api.rpcAuth) headers["Authorization"] = cfg.api.rpcAuth;
+  if (cfg.api.apiKey) headers[cfg.api.apiKeyHeader || "x-api-key"] = cfg.api.apiKey;
   var resp = await fetch(cfg.api.rpc, { method: "POST", headers: headers,
     body: JSON.stringify({ jsonrpc: "1.0", id: "zec", method: method, params: params || [] }) });
   // zcashd returns a JSON body (with .error) even on HTTP 500 for RPC errors, so
@@ -139,7 +143,7 @@ async function zecRpc(cfg, method, params) {
 // (consensus.nextblock) so it always matches the active upgrade; otherwise the
 // configured cfg.branchId is used (must be kept current — see networks.js).
 async function zecBranchId(cfg) {
-  if (cfg.api.style === "zcashd") {
+  if (cfg.api.style === "zcashd" || cfg.api.style === "tatum") {
     var info = await zecRpc(cfg, "getblockchaininfo", []);
     var nb = info && info.consensus && info.consensus.nextblock;
     var id = parseInt(nb, 16);
@@ -151,11 +155,49 @@ async function zecBranchId(cfg) {
   return cfg.branchId;
 }
 
+// Blockbook (Trezor) REST is what the live hosted providers expose for Zcash
+// (NOWNodes, GetBlock). It gives the full transparent-address shape the leg
+// needs — UTXO list, tx confirmations, and raw broadcast — over plain HTTPS.
+// Auth (when required, e.g. NOWNodes' "api-key" header) is passed via
+// cfg.api.apiKeyHeader + cfg.api.apiKey; GetBlock instead bakes the token into
+// cfg.api.base (go.getblock.io/<token>) and needs no header. The whole api
+// object is injected at runtime (params.legApiConfig) so no key is embedded in
+// the published action — see makeZecLeg.
+function bbHeaders(cfg) {
+  var h = {};
+  if (cfg.api.apiKey && cfg.api.apiKeyHeader) h[cfg.api.apiKeyHeader] = cfg.api.apiKey;
+  return h;
+}
+
 async function zecFetchUtxos(cfg, address) {
   if (cfg.api.style === "zcashd") {
     var u = await zecRpc(cfg, "getaddressutxos", [{ addresses: [address] }]);
     return u.filter(function (x) { return x.height > 0; })
             .map(function (x) { return { txid: x.txid, vout: x.outputIndex, amount: BigInt(x.satoshis) }; });
+  }
+  if (cfg.api.style === "tatum") {
+    // The Tatum gateway is a zcashd-compatible RPC node WITHOUT an address index
+    // (getaddressutxos → "method not found"), and Tatum's v4 Data API does not
+    // serve Zcash at all (verified 2026-06-07: supported chains are only
+    // btc/ltc/doge/cardano). So the gateway can't enumerate a t-address's UTXOs.
+    // Use it for broadcast/confirmations/branch-id (those work + live-resolve the
+    // branch id), and delegate UTXO listing to a separate indexed source via
+    // api.utxoApi (a blockbook/insight provider). Fail loudly if none is set
+    // rather than silently returning no UTXOs (which would look like "unfunded").
+    if (cfg.api.utxoApi) {
+      return zecFetchUtxos(Object.assign({}, cfg, { api: cfg.api.utxoApi }), address);
+    }
+    throw new Error("zec tatum: no UTXO source — the gateway has no address index and Tatum's Data API has no Zcash. Set api.utxoApi to a blockbook/insight provider.");
+  }
+  if (cfg.api.style === "blockbook") {
+    // Blockbook returns confirmed UTXOs with ?confirmed=true; value is a decimal
+    // string in zatoshis. Guard on confirmations>0 too (unconfirmed change must
+    // not be spent before the network sees it).
+    var bbResp = await fetch(cfg.api.base + "/api/v2/utxo/" + address + "?confirmed=true", { headers: bbHeaders(cfg) });
+    if (!bbResp.ok) throw new Error("zec blockbook utxo failed (http " + bbResp.status + "): " + (await bbResp.text()).slice(0, 200));
+    var bbArr = await bbResp.json();
+    return bbArr.filter(function (u) { return (u.confirmations || 0) > 0; })
+                .map(function (u) { return { txid: u.txid, vout: u.vout, amount: BigInt(u.value) }; });
   }
   var resp = await fetch(cfg.api.base + "/addr/" + address + "/utxo");
   if (resp.ok) {
@@ -173,9 +215,15 @@ async function zecFetchUtxos(cfg, address) {
 // Confirmations for a broadcast txid (see utxoConfirmations — same fail-closed
 // contract: 0 means keep waiting). zcashd reports confirmations directly.
 async function zecConfirmations(cfg, txid) {
-  if (cfg.api.style === "zcashd") {
+  if (cfg.api.style === "zcashd" || cfg.api.style === "tatum") {
     var t = await zecRpc(cfg, "getrawtransaction", [txid, 1]);
     return (t && t.confirmations > 0) ? t.confirmations : 0;
+  }
+  if (cfg.api.style === "blockbook") {
+    var bbResp = await fetch(cfg.api.base + "/api/v2/tx/" + txid, { headers: bbHeaders(cfg) });
+    if (!bbResp.ok) return 0;
+    var bbData = await bbResp.json();
+    return (bbData && bbData.confirmations > 0) ? bbData.confirmations : 0;
   }
   var resp = await fetch(cfg.api.base + "/tx/" + txid);
   if (!resp.ok) return 0;
@@ -184,8 +232,21 @@ async function zecConfirmations(cfg, txid) {
 }
 
 async function zecBroadcast(cfg, rawHex) {
-  if (cfg.api.style === "zcashd") {
+  if (cfg.api.style === "zcashd" || cfg.api.style === "tatum") {
     return zecRpc(cfg, "sendrawtransaction", [rawHex]);
+  }
+  if (cfg.api.style === "blockbook") {
+    // POST (not the GET /sendtx/<hex> form) so a multi-input tx can't blow the
+    // URL length limit. Body is the raw hex as text/plain. Blockbook replies
+    // { result: txid } on success or { error: {...} } on a consensus reject.
+    var bbHead = bbHeaders(cfg); bbHead["Content-Type"] = "text/plain";
+    var bbResp = await fetch(cfg.api.base + "/api/v2/sendtx/", { method: "POST", headers: bbHead, body: rawHex });
+    var bbData = null;
+    try { bbData = await bbResp.json(); } catch (e) { bbData = null; }
+    if (!bbResp.ok || !bbData || bbData.error) {
+      throw new Error("zec blockbook broadcast failed: " + (bbData && bbData.error ? JSON.stringify(bbData.error) : "http " + bbResp.status));
+    }
+    return bbData.result || bbData;
   }
   var resp = await fetch(cfg.api.base + "/tx/send", { method: "POST",
     headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rawtx: rawHex }) });
@@ -196,6 +257,17 @@ async function zecBroadcast(cfg, rawHex) {
 
 function makeZecLeg(ctx, chainId_, role) {
   var cfg = CHAINS[chainId_];
+  // Prefer a runtime-injected provider (params.legApiConfig[chain]) over the
+  // embedded default — the EVM leg does the same with legRpcUrls. The embedded
+  // CHAINS.api is a key-free placeholder (the public testnet explorer is dead),
+  // so a live run MUST pass legApiConfig, e.g.
+  //   legApiConfig: { 'zcash-testnet': { style: 'blockbook',
+  //     base: 'https://zec-testnet.blockbook.example', apiKeyHeader: 'api-key',
+  //     apiKey: '<key>' } }
+  // Keeping the key in a runtime param (never in CHAINS) is what keeps the
+  // published action CID free of any secret.
+  var apiOverride = (ctx.params && ctx.params.legApiConfig || {})[chainId_];
+  if (apiOverride) cfg = Object.assign({}, cfg, { api: apiOverride });
   var pub = secp256k1.getPublicKey(ctx.keyBytes, true); // compressed
   var myH160 = hash160(pub);
   var myScript = p2pkhScript(myH160);

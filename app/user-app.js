@@ -14,6 +14,10 @@ import { readQuotesForIntent, effectiveRate } from './lib/intents.js';
 import { verifySwapCid, fullVerifySwap, intentMatches } from './lib/verify.js';
 import { log, clearLog, showTab, toggleTheme, initThemeLabel } from './lib/ui.js';
 
+// The SwapContract lives on Base mainnet, so intent/swap txs go there regardless
+// of the swap's leg chains. Chain ids/labels/logos + evmChainHex come from the
+// shared registry (app/lib/chains.js); no hardcoded chain or hex maps here.
+const CONTRACT_CHAIN = 'base';
 let signer = null;
 let userAddress = null;
 
@@ -77,8 +81,8 @@ async function announceIntent() {
   try {
     const intentId = ethers.hexlify(ethers.randomBytes(32));
     const expiration = Math.floor(Date.now() / 1000 + hours * 3600);
-    log(out, 'Switch to Base Sepolia to announce…', 'dim');
-    await switchChain(evmChainHex('base-sepolia'));
+    log(out, 'Switch to Base mainnet to announce…', 'dim');
+    await switchChain(evmChainHex(CONTRACT_CHAIN));
     const c = writeContract(signer);
     log(out, 'Announcing intent…', 'dim');
     const tx = await c.announceIntent(

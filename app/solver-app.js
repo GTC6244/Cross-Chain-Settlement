@@ -6,19 +6,55 @@
  * leg, inject the dest asset and execute the Lit Action. Wires app/lib/*.
  */
 import {
-  BASE_RPC, CHAIN_RPC, LIT_API_BASE, CONTRACT_ADDRESS,
+  BASE_RPC, CHAIN_RPC, CHAIN_API, ZEC_PROVIDER_HOSTS, zecHybridProvider, LIT_API_BASE, CONTRACT_ADDRESS,
   writeContract, readSwap, readContract,
 } from './lib/contract.js';
 import {
-  CHAIN_FAMILY, randomSalt, templateKeyForChains, getActionCode, pickDeposit, computeCid, deriveAddresses,
+  CHAIN_FAMILY, randomSalt, templateKeyForChains, confirmationBlocksFor, getActionCode, pickDeposit, computeCid, deriveAddresses,
 } from './lib/derive.js';
 import { readOpenIntents } from './lib/intents.js';
 import { evmChainHex } from './lib/chains.js';
+import { fetchMarketRate, toHuman, toRaw } from './lib/prices.js';
 import { log, clearLog, showTab, toggleTheme, initThemeLabel } from './lib/ui.js';
+
+// The SwapContract is deployed on Base mainnet, so every createSwap/markExecuted
+// call must be sent from that chain regardless of the swap's leg chains.
+// Chain hex ids come from the shared registry (evmChainHex); no local map.
+const CONTRACT_CHAIN = 'base';
+
 
 let signer = null;
 let solverAddress = null;
 let selectedIntent = null;
+// Latest market read for the selected intent (from lib/prices). Holds the
+// fair-quote raw dest amount so the live margin readout can compare the
+// solver's typed quote against the median market cross-rate.
+let selectedMarket = null;
+
+// Non-EVM leg provider config (chainId → api object) passed to the action as
+// legApiConfig. Built fresh each send so nothing keyed is committed or baked
+// into the action CID:
+//   1. start from the key-free CHAIN_API default;
+//   2. build the proven Zcash hybrid (Tatum gateway + NOWNodes blockbook) for
+//      every supported chain from the operator's keys in localStorage
+//      'zecProviderKeys' = {"tatumKey":"…","nownodesKey":"…"} — drop them in once;
+//   3. a raw localStorage 'legApiConfig' JSON wins as an escape hatch (custom
+//      provider / self-hosted node).
+function legApiConfig() {
+  const merged = Object.assign({}, CHAIN_API);
+  try {
+    const keys = JSON.parse(localStorage.getItem('zecProviderKeys') || 'null');
+    if (keys) for (const chain of Object.keys(ZEC_PROVIDER_HOSTS)) {
+      const p = zecHybridProvider(chain, keys);
+      if (p) merged[chain] = p;
+    }
+  } catch (e) { /* malformed keys → skip the hybrid */ }
+  try {
+    const raw = localStorage.getItem('legApiConfig');
+    if (raw) Object.assign(merged, JSON.parse(raw));
+  } catch (e) { /* malformed override → keep what we have */ }
+  return merged;
+}
 
 async function connectWallet() {
   const btn = document.getElementById('wallet-btn');
@@ -96,7 +132,96 @@ function selectIntent(i) {
   const btn = document.getElementById('create-swap-btn');
   btn.disabled = false; btn.textContent = 'Create swap (your quote)';
   document.getElementById('quote-dest-amount').value = i.minDestAmount.toString();
+  loadPriceQuote(i);
   showTab('quote');
+}
+
+// ---- market price quotes (advisory) ---------------------------------------
+const fmtUsd = (n) => '$' + n.toLocaleString(undefined, { maximumFractionDigits: n < 1 ? 6 : 2 });
+const fmtRate = (n) => n.toLocaleString(undefined, { maximumSignificantDigits: 6 });
+
+/**
+ * Pull the live market cross-rate for the selected pair across three sources
+ * and render an advisory panel: each source's spot, the median fair dest amount
+ * for this intent's source amount, and how the floor sits vs market. Failures
+ * are non-fatal — the solver can always quote without it.
+ */
+async function loadPriceQuote(i) {
+  selectedMarket = null;
+  const box = document.getElementById('price-quote');
+  box.style.display = 'block';
+  box.innerHTML = '<div class="section-title" style="margin:0 0 8px">Market price <span class="pq-sub">· 3 independent sources</span></div>'
+    + '<div class="pq-loading"><span class="spinner"></span>Fetching live prices…</div>';
+  let m;
+  try {
+    m = await fetchMarketRate(i.sourceChain, i.destChain);
+  } catch (e) {
+    if (selectedIntent !== i) return; // a newer selection took over while we waited
+    box.innerHTML = '<div class="section-title" style="margin:0 0 8px">Market price</div>'
+      + '<div class="pq-note">No market reference for ' + i.sourceChain + ' → ' + i.destChain + ' (' + e.message + '). Quote against the floor.</div>';
+    renderMargin();
+    return;
+  }
+  if (selectedIntent !== i) return; // a newer selection took over while we waited
+  if (m.count === 0) {
+    box.innerHTML = '<div class="section-title" style="margin:0 0 8px">Market price <span class="pq-sub">· 3 independent sources</span></div>'
+      + rowsHtml(m)
+      + '<div class="pq-note">All price sources are unreachable right now — quote against the floor.</div>';
+    renderMargin();
+    return;
+  }
+
+  const srcHuman = toHuman(i.sourceAmount, m.sourceAsset);
+  const fairDestHuman = srcHuman * m.medianRate;
+  const fairDestRaw = toRaw(fairDestHuman, m.destAsset);
+  const floorRaw = Number(i.minDestAmount);
+  const floorMarginPct = ((fairDestRaw - floorRaw) / fairDestRaw) * 100;
+  selectedMarket = { ...m, sourceAsset: m.sourceAsset, destAsset: m.destAsset, srcHuman, fairDestHuman, fairDestRaw };
+
+  const floorLine = isFinite(floorMarginPct)
+    ? `<div class="pq-floor ${floorMarginPct >= 0 ? 'pos' : 'neg'}">Floor (${i.minDestAmount.toString()}) sits <strong>${floorMarginPct >= 0 ? floorMarginPct.toFixed(2) + '% below' : Math.abs(floorMarginPct).toFixed(2) + '% above'}</strong> market — `
+      + (floorMarginPct >= 0 ? 'your max spread quoting at the floor.' : 'quoting at the floor delivers above market value.') + '</div>'
+    : '';
+
+  box.innerHTML = `
+    <div class="section-title" style="margin:0 0 8px">Market price <span class="pq-sub">· median of ${m.count} source${m.count === 1 ? '' : 's'}</span></div>
+    ${rowsHtml(m)}
+    <div class="pq-fair">
+      <span class="pq-fair-label">Fair market quote for ${srcHuman.toLocaleString(undefined, { maximumSignificantDigits: 8 })} ${m.sourceAsset}</span>
+      <span class="pq-fair-amt">≈ ${fairDestHuman.toLocaleString(undefined, { maximumSignificantDigits: 8 })} ${m.destAsset}</span>
+      <span class="pq-fair-raw">${Math.round(fairDestRaw).toString()} (smallest unit)</span>
+    </div>
+    ${floorLine}`;
+  renderMargin();
+}
+
+function rowsHtml(m) {
+  const rows = m.sources.map((s) => {
+    if (!s.ok) return `<div class="pq-row off"><span class="pq-src">${s.label}</span><span class="pq-err">unavailable — ${s.error}</span></div>`;
+    return `<div class="pq-row"><span class="pq-src">${s.label}</span>`
+      + `<span class="pq-px">${m.sourceAsset} ${fmtUsd(s.srcUsd)}</span>`
+      + `<span class="pq-px">${m.destAsset} ${fmtUsd(s.destUsd)}</span>`
+      + `<span class="pq-x">1 ${m.sourceAsset} = ${fmtRate(s.rate)} ${m.destAsset}</span></div>`;
+  }).join('');
+  return '<div class="pq-rows">' + rows + '</div>';
+}
+
+/** Live spread of the typed quote vs the median market fair amount. */
+function renderMargin() {
+  const el = document.getElementById('quote-margin');
+  const v = document.getElementById('quote-dest-amount').value.trim();
+  if (!selectedMarket || !v || !/^\d+$/.test(v)) { el.style.display = 'none'; return; }
+  const yourRaw = Number(v);
+  const spreadPct = ((selectedMarket.fairDestRaw - yourRaw) / selectedMarket.fairDestRaw) * 100;
+  if (!isFinite(spreadPct)) { el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  if (spreadPct >= 0) {
+    el.className = 'quote-margin pos';
+    el.textContent = `+${spreadPct.toFixed(2)}% spread vs market — you deliver below market value (your gross margin).`;
+  } else {
+    el.className = 'quote-margin neg';
+    el.textContent = `${spreadPct.toFixed(2)}% vs market — this quote delivers above market value (you'd take a loss).`;
+  }
 }
 
 // ---- quote + create -------------------------------------------------------
@@ -129,13 +254,13 @@ async function createSwapForIntent() {
     const depositDest = pickDeposit(derived, 'dest');
     const litActionEvmAddr = derived.evmAddress;
 
-    log(out, 'Switch to Base Sepolia to create the swap…', 'dim');
-    await switchChain(evmChainHex('base-sepolia'));
+    log(out, 'Switch to Base mainnet to create the swap…', 'dim');
+    await switchChain(evmChainHex(CONTRACT_CHAIN));
     const c = writeContract(signer);
     const tx = await c.createSwap(
       i.intentId, i.sourceChain, i.destChain, i.sourceAmount, destAmount, i.minDestAmount,
       i.userRefundSource, i.userReceiveDest, solverReceiveSource, solverRefundDest,
-      depositSource, depositDest, 1, i.expiration, i.feeBps,
+      depositSource, depositDest, confirmationBlocksFor(i.sourceChain, i.destChain), i.expiration, i.feeBps,
       cid, salt, litActionEvmAddr, i.tokenSource, i.tokenDest,
     );
     log(out, 'Tx submitted: ' + tx.hash, 'dim');
@@ -258,10 +383,12 @@ async function executeSwap() {
         const resp = await fetch(`${LIT_API_BASE}/core/v1/lit_action`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Api-Key': litKey },
-          // legRpcUrls injects the leg RPC at runtime (chain → url) so the
-          // published action CID carries no keyed endpoint; the embedded
-          // key-free public default applies for any chain not listed here.
-          body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS, legRpcUrls: CHAIN_RPC } }),
+          // legRpcUrls (EVM) and legApiConfig (non-EVM, e.g. Zcash blockbook)
+          // inject the leg provider at runtime so the published action CID
+          // carries no keyed endpoint; the embedded key-free default applies for
+          // any chain not listed. An operator can paste a keyed provider into
+          // localStorage 'legApiConfig' without committing it to the repo.
+          body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS, legRpcUrls: CHAIN_RPC, legApiConfig: legApiConfig() } }),
         });
         const raw = await resp.text();
         if (resp.ok) {
@@ -329,6 +456,7 @@ document.getElementById('theme-btn').addEventListener('click', toggleTheme);
 document.getElementById('wallet-btn').addEventListener('click', connectWallet);
 document.getElementById('refresh-book').addEventListener('click', loadOrderBook);
 document.getElementById('create-swap-btn').addEventListener('click', createSwapForIntent);
+document.getElementById('quote-dest-amount').addEventListener('input', renderMargin);
 document.getElementById('check-fill-btn').addEventListener('click', checkFill);
 document.getElementById('fund-dest-btn').addEventListener('click', fundDest);
 document.getElementById('execute-btn').addEventListener('click', executeSwap);

@@ -130,31 +130,89 @@ export const CHAINS = {
   //      Default below is NU6 (mainnet since Nov 2024; testnet is NU6+). If the
   //      target chain has activated a later upgrade, update this. The robust
   //      fix is to fetch consensus.nextblock from a node at runtime.
-  //   2. Both explorer endpoints below are DEAD (explorer.testnet.z.cash DNS
-  //      gone; blockchair has no zcash testnet). Wire a working provider before
-  //      live use. The zec leg supports a self-hosted node directly:
-  //        api: { style: 'zcashd', rpc: '<url>', rpcAuth: 'Basic <b64 user:pass>' }
-  //      (run zcashd with -insightexplorer for getaddressutxos). The zcashd
-  //      style ALSO resolves the branch id live (getblockchaininfo →
-  //      consensus.nextblock), so branchId above is then only a fallback.
-  //      Verified end-to-end against a self-hosted regtest node — see
-  //      .context/zec-verify/harness/verify-node.mjs.
+  //   2. The api below is a DEAD key-free placeholder (explorer.testnet.z.cash
+  //      DNS gone; blockchair has no zcash testnet — both confirmed dead
+  //      2026-06-07). A live run MUST inject a working provider at runtime via
+  //      the `legApiConfig` js_param (chainId → api object) — exactly how EVM
+  //      legs take legRpcUrls — so no endpoint or key is baked into the action.
+  //      The zec leg supports these api styles:
+  //        - blockbook: hosted REST from NOWNodes / GetBlock (free tier + key).
+  //            { style: 'blockbook', base: '<host>',
+  //              apiKeyHeader: 'api-key', apiKey: '<key>' }   // NOWNodes
+  //            { style: 'blockbook', base: 'https://go.getblock.io/<token>' } // GetBlock
+  //          Endpoints: /api/v2/utxo/:addr, /api/v2/tx/:txid, /api/v2/sendtx/.
+  //        - tatum: the Tatum RPC gateway, a zcashd-compatible node. Verified
+  //            live (2026-06-07) for broadcast + confirmations + branch-id
+  //            (live-resolved — testnet is past NU6, see branchId below). It can
+  //            NOT list a t-address's UTXOs: the node has no address index
+  //            (getaddressutxos → method not found) and Tatum's v4 Data API does
+  //            not serve Zcash (only btc/ltc/doge/cardano). So `tatum` delegates
+  //            UTXO listing to api.utxoApi — pair the gateway with a blockbook
+  //            (NOWNodes/GetBlock) source:
+  //            { style: 'tatum', rpc: 'https://zcash-testnet.gateway.tatum.io',
+  //              apiKey: '<tatum-key>',  // x-api-key
+  //              utxoApi: { style: 'blockbook', base: '<blockbook-host>',
+  //                         apiKeyHeader: 'api-key', apiKey: '<key>' } }
+  //        - zcashd: self-hosted node (run with -insightexplorer for
+  //            getaddressutxos). { style: 'zcashd', rpc: '<url>',
+  //            rpcAuth: 'Basic <b64 user:pass>' }. ALSO resolves the branch id
+  //            live (getblockchaininfo → consensus.nextblock), so branchId
+  //            above is then only a fallback.
+  //        - insight: classic Bitcore explorer (no live public instance known).
+  //      ZIP-243 sign/serialize verified end-to-end on a self-hosted regtest
+  //      node — see .context/zec-verify/harness/verify-node.mjs. Provider wiring
+  //      is exercised by .context/zec-verify/verify-live.mjs.
   'zcash-testnet': {
     family: 'zec',
     addrType: 't-p2pkh',
     pubKeyHash2: [0x1d, 0x25],   // tm... transparent testnet
     scriptHash2: [0x1c, 0xba],
+    // DEAD placeholder — override at runtime via legApiConfig (see note above).
     api: { style: 'insight', base: 'https://explorer.testnet.z.cash/api',
-           fallback: 'https://api.blockchair.com/zcash/testnet' }, // DEAD — see note above
+           fallback: 'https://api.blockchair.com/zcash/testnet' },
     dust: 5460,
     amountField: 'satoshis',
     txVersion: 4,                // Sapling v4 (ZIP-243)
     versionGroupId: 0x892f2085,  // Sapling version group id
-    branchId: 0xc8e71055,        // NU6 consensus branch id — MUST match active upgrade
+    // Live testnet branch id observed 2026-06-07 via the Tatum gateway
+    // (getblockchaininfo → consensus.nextblock = 5437f330) — testnet is PAST NU6
+    // (c8e71055). This default is only used by styles that can't live-fetch
+    // (blockbook/insight); the zcashd/tatum styles read it live from the node,
+    // which is the robust path since testnet activates upgrades ahead of mainnet.
+    branchId: 0x5437f330,        // active testnet branch id — MUST match active upgrade
     // Fees follow ZIP-317 (zip317Fee in the zec leg), not these sat/byte values;
     // kept only for reference. dust is the only field the zec leg still reads.
     defaultFeeRate: 10,          // zat/byte (unused — ZIP-317 conventional fee applies)
     minFee: 1000,                // zatoshis (unused)
+    decimals: 8,
+  },
+
+  // ---- Zcash MAINNET (transparent t1, same ZIP-243 shim as testnet) -----
+  // Live mainnet. UTXO/broadcast/confirmations are served by NOWNodes blockbook
+  // (zecbook.nownodes.io — verified live 2026-06-08); the api below is the
+  // key-free host, the api-key is injected at runtime via legApiConfig so the
+  // action CID carries no secret. branchId is NU6 (mainnet active since Nov
+  // 2024); blockbook can't live-fetch it, so it's hardcoded here — keep current.
+  'zcash-mainnet': {
+    family: 'zec',
+    addrType: 't-p2pkh',
+    pubKeyHash2: [0x1c, 0xb8],   // t1... transparent mainnet P2PKH
+    scriptHash2: [0x1c, 0xbd],   // t3... mainnet P2SH
+    api: { style: 'blockbook', base: 'https://zecbook.nownodes.io' }, // key-free; key via legApiConfig
+    dust: 5460,
+    amountField: 'satoshis',
+    txVersion: 4,                // Sapling v4 (ZIP-243)
+    versionGroupId: 0x892f2085,  // Sapling version group id
+    // Live mainnet branch id observed 2026-06-08 via the Tatum gateway
+    // (getblockchaininfo → consensus.nextblock = 5437f330) — mainnet is PAST NU6
+    // (c8e71055). An earlier c8e71055 here made the FIRST live settle (swap #14)
+    // sign with the stale id → mandatory-script-verify-flag-failed; the fix was a
+    // runtime `tatum` provider that live-fetches the id. Prefer the zcashd/tatum
+    // style (live-fetch) over blockbook-only, since this hardcoded value goes
+    // stale at every network upgrade.
+    branchId: 0x5437f330,        // active mainnet branch id — MUST match active upgrade
+    defaultFeeRate: 10,          // unused — ZIP-317 conventional fee applies
+    minFee: 1000,                // unused
     decimals: 8,
   },
 

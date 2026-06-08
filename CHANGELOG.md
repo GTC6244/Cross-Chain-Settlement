@@ -5,6 +5,49 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Market price quotes in the solver's Quote tab.** When a solver selects an
+  intent, a live **Market price** panel now pulls each leg asset's USD spot from
+  three independent, key-free sources (CoinGecko, Coinbase, CryptoCompare) and
+  shows each source's price, the **median** cross-rate, the fair dest amount for
+  the intent's source amount, and how the floor sits versus market. A live
+  margin readout under the dest-amount input shows the solver's spread (gross
+  margin when quoting below market value, a loss warning above it). Prices are
+  advisory display only — the on-chain floor and the solver's judgement still
+  govern, and no source is trusted alone. New `app/lib/prices.js` (asset/decimals
+  maps, the three sources, `fetchMarketRate`, median/unit helpers) with unit
+  coverage for the pure helpers in `test/lib.test.js`.
+- First live **EVM↔Zcash mainnet** settlement (swap #14): the transparent
+  ZIP-243 signer is now proven on mainnet, not just regtest. The working provider
+  is a hybrid — Tatum's RPC gateway live-fetches the consensus branch id
+  (mainnet/testnet are past NU6 → `5437f330`; the `zcash-mainnet`/`zcash-testnet`
+  `branchId` defaults were corrected, but live-fetch is the robust path) and
+  handles broadcast + confirmations, while NOWNodes blockbook lists the
+  t-address UTXOs. The solver app now builds this hybrid for `legApiConfig`
+  automatically from operator keys in `localStorage.zecProviderKeys`
+  (`{"tatumKey":"…","nownodesKey":"…"}`) via the key-free `zecHybridProvider`
+  helper — no secret ever touches the repo or the action CID. A `zcash-mainnet`
+  chain config and `base`/`zcash-mainnet` routing were added, the user/solver
+  apps gained Base-mainnet + Zcash-mainnet chain options (and now switch to Base
+  mainnet — not Sepolia — for the contract calls), and the solver sets a
+  chain-aware `confirmationBlocks` via `confirmationBlocksFor()` (zcash-mainnet 5,
+  BTC/LTC 4, DOGE 10, testnets 1) instead of a hardcoded `1`.
+- Zcash legs can now take their provider at runtime via a `legApiConfig`
+  js_param (chainId → api object) — the non-EVM analogue of `legRpcUrls`, so the
+  published action CID stays free of any keyed endpoint. The ZEC leg gained a
+  `blockbook` provider style (the REST shape NOWNodes / GetBlock expose:
+  `/api/v2/utxo`, `/api/v2/tx`, `/api/v2/sendtx`) and a `tatum` style (the Tatum
+  zcashd-compatible RPC gateway — verified live for broadcast / confirmations /
+  live branch-id; it can't enumerate a t-address's UTXOs, so it delegates UTXO
+  listing to an `api.utxoApi` blockbook/insight source) alongside the existing
+  `zcashd` and `insight` styles, with optional header auth. The zcash-testnet
+  `branchId` default was corrected to `5437f330` (testnet is past NU6, observed
+  live via the gateway). This unblocks live
+  verification of all five ZEC pairs (the previously baked-in public testnet
+  explorer is dead). New `test/zec-leg.test.js` covers the blockbook parsing,
+  and `.context/zec-verify/verify-live.mjs` validates a provider before a live
+  settle. A live EVM↔ZEC run still needs a provider key + testnet funds (TAZ).
+
 ### Security
 - The published Lit Action no longer carries any RPC API key. The leg RPC is now
   injected at runtime via a `legRpcUrls` param (chain → url), and the endpoint

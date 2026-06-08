@@ -53,7 +53,8 @@ const META = {
   'arbitrum-sepolia':  ['Arbitrum Sepolia', 'arbitrum'],
   'optimism-sepolia':  ['Optimism Sepolia', 'optimism'],
 
-  // non-EVM testnet
+  // non-EVM (Zcash mainnet settles live — EVM↔ZEC swap #14)
+  'zcash-mainnet':     ['Zcash (mainnet)', 'zcash'],
   'bitcoin-signet':    ['Bitcoin Signet', 'bitcoin'],
   'litecoin-testnet':  ['Litecoin Testnet', 'litecoin'],
   'dogecoin-testnet':  ['Dogecoin Testnet', 'dogecoin'],
@@ -80,8 +81,8 @@ export const CHAIN_GROUPS = [
   ['EVM · Testnet', [
     'base-sepolia', 'ethereum-sepolia', 'arbitrum-sepolia', 'optimism-sepolia',
   ]],
-  ['Bitcoin & others · Testnet', [
-    'bitcoin-signet', 'litecoin-testnet', 'dogecoin-testnet', 'zcash-testnet', 'solana-devnet',
+  ['Bitcoin, Zcash & Solana', [
+    'zcash-mainnet', 'bitcoin-signet', 'litecoin-testnet', 'dogecoin-testnet', 'zcash-testnet', 'solana-devnet',
   ]],
 ];
 
