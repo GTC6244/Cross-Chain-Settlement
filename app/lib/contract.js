@@ -27,6 +27,40 @@ export const CHAIN_RPC = {
 
 export const BASE_RPC = CHAIN_RPC['base'];
 
+// Non-EVM provider config injected at runtime as the `legApiConfig` js_param
+// (chainId → api object), mirroring CHAIN_RPC/legRpcUrls for EVM. Empty &
+// key-free by default so nothing keyed is committed or baked into the action
+// CID. Keys are supplied by the operator at runtime (see zecHybridProvider +
+// the solver app's legApiConfig builder) — never in the repo.
+export const CHAIN_API = {};
+
+// Zcash hybrid provider — the configuration proven live on mainnet (swap #14).
+// The Tatum RPC gateway live-fetches the consensus branch id (mainnet/testnet
+// are past NU6 → 5437f330; a stale hardcoded id fails mandatory-script-verify)
+// and handles broadcast + confirmations; NOWNodes blockbook lists the t-address
+// UTXOs (the gateway node has no address index, and Tatum's Data API has no
+// Zcash). Hosts are key-free; the operator's keys are passed in at runtime.
+export const ZEC_PROVIDER_HOSTS = {
+  'zcash-mainnet': { gateway: 'https://zcash-mainnet.gateway.tatum.io', blockbook: 'https://zecbook.nownodes.io' },
+  // NOTE: NOWNodes has no Zcash *testnet* blockbook, so the testnet hybrid has no
+  // UTXO source — testnet needs a self-hosted zcashd/zebra (-insightexplorer).
+};
+
+/**
+ * Build the proven Zcash hybrid `legApiConfig` entry for a chain from operator
+ * keys. Returns null if the chain/keys aren't available (caller skips it).
+ * @param {string} chain  e.g. 'zcash-mainnet'
+ * @param {{tatumKey:string, nownodesKey:string}} keys
+ */
+export function zecHybridProvider(chain, keys) {
+  const h = ZEC_PROVIDER_HOSTS[chain];
+  if (!h || !keys || !keys.tatumKey || !keys.nownodesKey) return null;
+  return {
+    style: 'tatum', rpc: h.gateway, apiKey: keys.tatumKey,
+    utxoApi: { style: 'blockbook', base: h.blockbook, apiKeyHeader: 'api-key', apiKey: keys.nownodesKey },
+  };
+}
+
 export const STATE_NAMES = ['Created', 'Funded', 'Executed', 'Refunded', 'Expired'];
 export const STATE_CLASSES = ['badge-created', 'badge-created', 'badge-executed', 'badge-refunded', 'badge-expired'];
 

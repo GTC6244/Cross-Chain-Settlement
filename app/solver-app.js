@@ -6,23 +6,53 @@
  * leg, inject the dest asset and execute the Lit Action. Wires app/lib/*.
  */
 import {
-  BASE_RPC, CHAIN_RPC, LIT_API_BASE, CONTRACT_ADDRESS,
+  BASE_RPC, CHAIN_RPC, CHAIN_API, ZEC_PROVIDER_HOSTS, zecHybridProvider, LIT_API_BASE, CONTRACT_ADDRESS,
   writeContract, readSwap, readContract,
 } from './lib/contract.js';
 import {
-  CHAIN_FAMILY, randomSalt, templateKeyForChains, getActionCode, pickDeposit, computeCid, deriveAddresses,
+  CHAIN_FAMILY, randomSalt, templateKeyForChains, confirmationBlocksFor, getActionCode, pickDeposit, computeCid, deriveAddresses,
 } from './lib/derive.js';
 import { readOpenIntents } from './lib/intents.js';
 import { log, clearLog, showTab, toggleTheme, initThemeLabel } from './lib/ui.js';
 
 const CHAIN_HEX = {
+  'base': '0x2105', // Base mainnet (8453) — where the contract is deployed
   'base-sepolia': '0x14a34', 'ethereum-sepolia': '0xaa36a7',
   'arbitrum-sepolia': '0x66eee', 'optimism-sepolia': '0xaa37dc',
 };
 
+// The SwapContract is deployed on Base mainnet, so every createSwap/markExecuted
+// call must be sent from that chain regardless of the swap's leg chains.
+const CONTRACT_CHAIN = 'base';
+
 let signer = null;
 let solverAddress = null;
 let selectedIntent = null;
+
+// Non-EVM leg provider config (chainId → api object) passed to the action as
+// legApiConfig. Built fresh each send so nothing keyed is committed or baked
+// into the action CID:
+//   1. start from the key-free CHAIN_API default;
+//   2. build the proven Zcash hybrid (Tatum gateway + NOWNodes blockbook) for
+//      every supported chain from the operator's keys in localStorage
+//      'zecProviderKeys' = {"tatumKey":"…","nownodesKey":"…"} — drop them in once;
+//   3. a raw localStorage 'legApiConfig' JSON wins as an escape hatch (custom
+//      provider / self-hosted node).
+function legApiConfig() {
+  const merged = Object.assign({}, CHAIN_API);
+  try {
+    const keys = JSON.parse(localStorage.getItem('zecProviderKeys') || 'null');
+    if (keys) for (const chain of Object.keys(ZEC_PROVIDER_HOSTS)) {
+      const p = zecHybridProvider(chain, keys);
+      if (p) merged[chain] = p;
+    }
+  } catch (e) { /* malformed keys → skip the hybrid */ }
+  try {
+    const raw = localStorage.getItem('legApiConfig');
+    if (raw) Object.assign(merged, JSON.parse(raw));
+  } catch (e) { /* malformed override → keep what we have */ }
+  return merged;
+}
 
 async function connectWallet() {
   const btn = document.getElementById('wallet-btn');
@@ -133,13 +163,13 @@ async function createSwapForIntent() {
     const depositDest = pickDeposit(derived, 'dest');
     const litActionEvmAddr = derived.evmAddress;
 
-    log(out, 'Switch to Base Sepolia to create the swap…', 'dim');
-    await switchChain(CHAIN_HEX['base-sepolia']);
+    log(out, 'Switch to Base mainnet to create the swap…', 'dim');
+    await switchChain(CHAIN_HEX[CONTRACT_CHAIN]);
     const c = writeContract(signer);
     const tx = await c.createSwap(
       i.intentId, i.sourceChain, i.destChain, i.sourceAmount, destAmount, i.minDestAmount,
       i.userRefundSource, i.userReceiveDest, solverReceiveSource, solverRefundDest,
-      depositSource, depositDest, 1, i.expiration, i.feeBps,
+      depositSource, depositDest, confirmationBlocksFor(i.sourceChain, i.destChain), i.expiration, i.feeBps,
       cid, salt, litActionEvmAddr, i.tokenSource, i.tokenDest,
     );
     log(out, 'Tx submitted: ' + tx.hash, 'dim');
@@ -262,10 +292,12 @@ async function executeSwap() {
         const resp = await fetch(`${LIT_API_BASE}/core/v1/lit_action`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Api-Key': litKey },
-          // legRpcUrls injects the leg RPC at runtime (chain → url) so the
-          // published action CID carries no keyed endpoint; the embedded
-          // key-free public default applies for any chain not listed here.
-          body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS, legRpcUrls: CHAIN_RPC } }),
+          // legRpcUrls (EVM) and legApiConfig (non-EVM, e.g. Zcash blockbook)
+          // inject the leg provider at runtime so the published action CID
+          // carries no keyed endpoint; the embedded key-free default applies for
+          // any chain not listed. An operator can paste a keyed provider into
+          // localStorage 'legApiConfig' without committing it to the repo.
+          body: JSON.stringify({ code, js_params: { mode: 'execute', swapId: Number(swapId), baseRpcUrl: BASE_RPC, contractAddress: CONTRACT_ADDRESS, legRpcUrls: CHAIN_RPC, legApiConfig: legApiConfig() } }),
         });
         const raw = await resp.text();
         if (resp.ok) {

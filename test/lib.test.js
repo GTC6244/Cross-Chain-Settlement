@@ -5,9 +5,10 @@
  * paging math, quote grouping/sorting, and CID compare.
  */
 import { strict as assert } from 'assert';
-import { randomSalt, templateKeyForChains, pickDeposit } from '../app/lib/derive.js';
+import { randomSalt, templateKeyForChains, pickDeposit, confirmationBlocksFor } from '../app/lib/derive.js';
 import { chunkRanges, effectiveRate, groupQuotesByIntent, sortQuotesByRate } from '../app/lib/intents.js';
 import { compareCid, intentMatches } from '../app/lib/verify.js';
+import { zecHybridProvider, ZEC_PROVIDER_HOSTS, CHAIN_API } from '../app/lib/contract.js';
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -130,6 +131,40 @@ await test('intentMatches: tampered userReceiveDest is rejected', async () => {
 await test('intentMatches: tampered sourceAmount / feeChain flagged', async () => {
   assert.ok(intentMatches(swapFrom({ sourceAmount: 999999n }), INTENT).mismatches.includes('sourceAmount'));
   assert.ok(intentMatches(swapFrom({ feeBps: 300 }), INTENT).mismatches.includes('feeBps'));
+});
+
+// ---- Zcash hybrid provider builder (solver app legApiConfig) ----
+await test('zecHybridProvider: builds the proven tatum+blockbook hybrid from keys', async () => {
+  const p = zecHybridProvider('zcash-mainnet', { tatumKey: 'TK', nownodesKey: 'NK' });
+  assert.equal(p.style, 'tatum');
+  assert.equal(p.rpc, ZEC_PROVIDER_HOSTS['zcash-mainnet'].gateway);
+  assert.equal(p.apiKey, 'TK', 'gateway uses the tatum key');
+  assert.equal(p.utxoApi.style, 'blockbook');
+  assert.equal(p.utxoApi.base, ZEC_PROVIDER_HOSTS['zcash-mainnet'].blockbook);
+  assert.equal(p.utxoApi.apiKeyHeader, 'api-key');
+  assert.equal(p.utxoApi.apiKey, 'NK', 'utxo source uses the nownodes key');
+});
+
+await test('zecHybridProvider: returns null without both keys or for an unknown chain', async () => {
+  assert.equal(zecHybridProvider('zcash-mainnet', { tatumKey: 'TK' }), null, 'needs nownodes key');
+  assert.equal(zecHybridProvider('zcash-mainnet', null), null);
+  assert.equal(zecHybridProvider('zcash-testnet', { tatumKey: 'TK', nownodesKey: 'NK' }), null, 'no testnet blockbook host');
+});
+
+await test('CHAIN_API ships empty/key-free (no committed secrets)', async () => {
+  assert.deepEqual(CHAIN_API, {});
+});
+
+// ---- chain-aware confirmation depth ----
+await test('confirmationBlocksFor: deep for ZEC mainnet, shallow for testnets', async () => {
+  assert.equal(confirmationBlocksFor('base', 'zcash-mainnet'), 5, 'zec mainnet leg → 5');
+  assert.equal(confirmationBlocksFor('zcash-mainnet', 'base'), 5, 'direction-independent');
+  assert.equal(confirmationBlocksFor('base', 'zcash-testnet'), 1, 'zec testnet → 1');
+  assert.equal(confirmationBlocksFor('base', 'bitcoin-signet'), 1, 'signet → 1');
+});
+
+await test('confirmationBlocksFor: all-EVM swap floors at 1 (gate never disabled, but no UTXO/ZEC leg to gate)', async () => {
+  assert.equal(confirmationBlocksFor('base', 'base-sepolia'), 1);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
