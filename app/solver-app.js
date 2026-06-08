@@ -13,12 +13,8 @@ import {
   CHAIN_FAMILY, randomSalt, templateKeyForChains, getActionCode, pickDeposit, computeCid, deriveAddresses,
 } from './lib/derive.js';
 import { readOpenIntents } from './lib/intents.js';
+import { evmChainHex } from './lib/chains.js';
 import { log, clearLog, showTab, toggleTheme, initThemeLabel } from './lib/ui.js';
-
-const CHAIN_HEX = {
-  'base-sepolia': '0x14a34', 'ethereum-sepolia': '0xaa36a7',
-  'arbitrum-sepolia': '0x66eee', 'optimism-sepolia': '0xaa37dc',
-};
 
 let signer = null;
 let solverAddress = null;
@@ -134,7 +130,7 @@ async function createSwapForIntent() {
     const litActionEvmAddr = derived.evmAddress;
 
     log(out, 'Switch to Base Sepolia to create the swap…', 'dim');
-    await switchChain(CHAIN_HEX['base-sepolia']);
+    await switchChain(evmChainHex('base-sepolia'));
     const c = writeContract(signer);
     const tx = await c.createSwap(
       i.intentId, i.sourceChain, i.destChain, i.sourceAmount, destAmount, i.minDestAmount,
@@ -202,7 +198,7 @@ async function fundDest() {
   try {
     const s = await readSwap(swapId);
     if (CHAIN_FAMILY[s.destChain] === 'evm' && s.tokenAddressDest === ethers.ZeroAddress) {
-      await switchChain(CHAIN_HEX[s.destChain]);
+      await switchChain(evmChainHex(s.destChain));
       const tx = await signer.sendTransaction({ to: s.depositAddressDest, value: s.destAmount });
       log(out, 'Tx submitted: ' + tx.hash, 'dim');
       await tx.wait();
