@@ -9,6 +9,7 @@ import { randomSalt, templateKeyForChains, pickDeposit, confirmationBlocksFor } 
 import { chunkRanges, effectiveRate, groupQuotesByIntent, sortQuotesByRate } from '../app/lib/intents.js';
 import { compareCid, intentMatches } from '../app/lib/verify.js';
 import { zecHybridProvider, ZEC_PROVIDER_HOSTS, CHAIN_API } from '../app/lib/contract.js';
+import { median, toHuman, toRaw, ASSET_BY_CHAIN, DECIMALS_BY_ASSET } from '../app/lib/prices.js';
 
 let passed = 0, failed = 0;
 async function test(name, fn) {
@@ -165,6 +166,49 @@ await test('confirmationBlocksFor: deep for ZEC mainnet, shallow for testnets', 
 
 await test('confirmationBlocksFor: all-EVM swap floors at 1 (gate never disabled, but no UTXO/ZEC leg to gate)', async () => {
   assert.equal(confirmationBlocksFor('base', 'base-sepolia'), 1);
+});
+
+// ---- market price helpers (app/lib/prices.js) ----
+await test('median: odd length returns the middle element', async () => {
+  assert.equal(median([3, 1, 2]), 2);
+  assert.equal(median([5]), 5);
+});
+
+await test('median: even length averages the two middles', async () => {
+  assert.equal(median([1, 2, 3, 4]), 2.5);
+  assert.equal(median([10, 20]), 15);
+});
+
+await test('median: empty array -> null (no sources answered)', async () => {
+  assert.equal(median([]), null);
+});
+
+await test('toHuman: raw smallest units -> human amount per asset decimals', async () => {
+  assert.equal(toHuman('1000000000000000000', 'ETH'), 1);   // 1e18 wei = 1 ETH (18)
+  assert.equal(toHuman('100000000', 'ZEC'), 1);             // 1e8 zat = 1 ZEC (8)
+  assert.equal(toHuman('1000000000', 'SOL'), 1);            // 1e9 lamports = 1 SOL (9)
+});
+
+await test('toRaw: human amount -> raw smallest units per asset decimals', async () => {
+  assert.equal(toRaw(1, 'ETH'), 1e18);
+  assert.equal(toRaw(2.5, 'ZEC'), 250000000);
+});
+
+await test('toHuman/toRaw: round-trip a whole-unit amount', async () => {
+  for (const asset of ['ETH', 'BTC', 'ZEC', 'SOL']) {
+    assert.equal(toHuman(toRaw(3, asset), asset), 3, asset);
+  }
+});
+
+await test('ASSET_BY_CHAIN / DECIMALS_BY_ASSET cover every swap chain', async () => {
+  // every chain maps to an asset, and every mapped asset has a decimals entry
+  for (const chain of Object.keys(ASSET_BY_CHAIN)) {
+    const asset = ASSET_BY_CHAIN[chain];
+    assert.ok(asset, `${chain} has an asset`);
+    assert.ok(DECIMALS_BY_ASSET[asset] >= 0, `${asset} has decimals`);
+  }
+  assert.equal(ASSET_BY_CHAIN['base'], 'ETH');
+  assert.equal(ASSET_BY_CHAIN['zcash-mainnet'], 'ZEC');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);
