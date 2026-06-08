@@ -11,6 +11,13 @@
   <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="settled.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.13.4/ethers.umd.min.js"></script>
+  <style>
+    /* Explorer is a full-screen-width view — override the centered, capped
+       container (main.pro maxes at --container-pro). The .ledger.explore grid
+       uses fractional columns, so it fills whatever width main gives it. */
+    main.pro { max-width: none; width: 100%; margin: 24px 0; padding: 0 24px; box-sizing: border-box; }
+    main .hero p { max-width: 70ch; }
+  </style>
 </head>
 <body>
 
