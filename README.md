@@ -204,6 +204,7 @@ All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "
 
 ## Features
 
+- **Multi-chain selector** -- the From/To menus cover 24 EVM mainnets alongside the testnet and Bitcoin/Zcash/Solana options, each shown with its chain logo. Chain identity lives in two registries: `app/actions/lib/networks.js` (signing params, embedded in the action) and `app/lib/chains.js` (labels/logos/dropdown for the UI). Six more top EVM chains (zkSync Era, Arbitrum, Aurora, Kava, Metis, Polygon zkEVM) are held back until a live funded settlement proves them — the engine already supports the transaction shapes they need (legacy/EIP-1559 + per-chain gas), so re-enabling each is a config line plus one live test (see TODOS).
 - **Two-sided market** -- users announce intents; solvers compete by building swaps, each quoting a `destAmount` at or above the user's floor
 - **On-chain order book** -- a client-side scan of `IntentAnnounced` / `SwapCreated` events; no backend, no indexer (truncated scans are surfaced, never hidden)
 - **Competing quotes** -- the user sees every solver's quote best-rate-first and funds the best; each quote is a distinct swap with its own key, so funding one can never settle another
@@ -220,19 +221,24 @@ All actions have two modes: `mode: "derive"` returns deposit addresses; `mode: "
 # Solidity (53 tests)
 cd contracts && forge test
 
-# Lit Action + browser-core logic (85 tests, Node 22+)
-node test/engine.test.js          # real runSwap state machine, mock legs (22)
+# Lit Action + browser-core logic (120 tests, Node 22+)
+node test/engine.test.js          # real runSwap state machine, mock legs (27)
 node test/utxo-math.test.js       # coin selection / fee math (14)
 node test/evm-evm-action.test.js  # settlement flow (9)
 node test/evm-btc-action.test.js  # settlement flow (8)
-node test/lib.test.js             # browser shared-core pure helpers (21)
+node test/evm-tx-type.test.js     # per-chain legacy/1559 + gas tx shaping (8)
+node test/lib.test.js             # browser shared-core pure helpers (30)
+node test/chains-registry.test.js # chain registry integrity (13)
 node test/zec-leg.test.js         # ZEC blockbook + tatum provider parsing (11)
 
 # Assemble + syntax-check all 11 action templates
 node test/_gen.mjs && for f in /tmp/genactions/*.mjs; do node --check "$f"; done
+
+# Live, on-demand: each EVM RPC's chainId + EIP-1559 support (not a unit test)
+node test/rpc-smoke.mjs
 ```
 
-`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy, including the four-address settle/refund mapping and the dest-floor assert. `test/lib.test.js` covers the browser shared core (`app/lib/*`) pure helpers: random salt, template dispatch, deposit picking, order-book paging, quote group/sort, CID compare. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions (including the Zcash ZIP-317 fee math). `test/zec-leg.test.js` loads the embedded `zecLegSrc()` and drives its blockbook provider branches (UTXO list, tx confirmations, raw broadcast) with a mock fetch — the parsing layer a live Zcash settle depends on. The EVM and Bitcoin signers are now verified live (EVM↔EVM on Base mainnet, EVM↔BTC on signet); the LTC/DOGE/SOL signers run only in the Lit runtime and still need live verification. Contract tests cover the full intent → fill → per-leg settlement lifecycle.
+`test/engine.test.js` drives the actual `runSwap` engine from `lib/engine.js` with mock legs and a mock Base writer — it tests the code that ships, not a copy, including the four-address settle/refund mapping and the dest-floor assert. `test/lib.test.js` covers the browser shared core (`app/lib/*`) pure helpers: random salt, template dispatch, deposit picking, order-book paging, quote group/sort, CID compare. `test/utxo-math.test.js` loads the exact coin-selection source embedded into the actions (including the Zcash ZIP-317 fee math). `test/zec-leg.test.js` loads the embedded `zecLegSrc()` and drives its blockbook provider branches (UTXO list, tx confirmations, raw broadcast) with a mock fetch — the parsing layer a live Zcash settle depends on. `test/chains-registry.test.js` guards the chain registry (dropdown↔networks coherence, unique chainIds, key-free embedded RPCs), and `test/evm-tx-type.test.js` checks the engine's per-chain transaction shaping (legacy vs EIP-1559, per-chain gas) by capturing the fields the signer would build. The EVM and Bitcoin signers are now verified live (EVM↔EVM on Base mainnet, EVM↔BTC on signet); the LTC/DOGE/SOL signers run only in the Lit runtime and still need live verification. Contract tests cover the full intent → fill → per-leg settlement lifecycle.
 
 For a live Zcash settle the public testnet explorer is dead, so the leg takes its provider at runtime via the `legApiConfig` js_param (chainId → api object) — the non-EVM analogue of `legRpcUrls` — keeping the published action CID free of any keyed endpoint. Supported styles: `blockbook` (hosted REST from NOWNodes / GetBlock, free tier + key), `tatum` (the Tatum zcashd-compatible RPC gateway — verified live for broadcast/confirmations/branch-id; it can't list UTXOs, so it delegates UTXO enumeration to an `api.utxoApi` blockbook source), `zcashd` (self-hosted node, `-insightexplorer`), and `insight` (classic Bitcore). Verify a provider before settling with `node .context/zec-verify/verify-live.mjs` (see its header for env vars).
 
