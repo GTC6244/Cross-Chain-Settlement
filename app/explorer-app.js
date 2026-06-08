@@ -15,7 +15,8 @@ import { toggleTheme, initThemeLabel } from './lib/ui.js';
 const CHAIN_LABELS = {
   // mainnet (live)
   'base': 'Base', 'ethereum': 'Ethereum', 'bitcoin': 'Bitcoin',
-  'litecoin': 'Litecoin', 'dogecoin': 'Dogecoin', 'zcash': 'Zcash', 'solana': 'Solana',
+  'litecoin': 'Litecoin', 'dogecoin': 'Dogecoin', 'zcash': 'Zcash',
+  'zcash-mainnet': 'Zcash', 'solana': 'Solana',
   // testnets
   'base-sepolia': 'Base Sepolia', 'ethereum-sepolia': 'Ethereum Sepolia',
   'arbitrum-sepolia': 'Arbitrum Sepolia', 'optimism-sepolia': 'Optimism Sepolia',

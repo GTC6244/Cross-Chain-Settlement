@@ -14,6 +14,10 @@ import { verifySwapCid, fullVerifySwap, intentMatches } from './lib/verify.js';
 import { log, clearLog, showTab, toggleTheme, initThemeLabel } from './lib/ui.js';
 
 const CHAINS = [
+  // Mainnet (live) — the contract is deployed on Base mainnet; ZEC settles via
+  // the solver's NOWNodes/Tatum hybrid provider.
+  ['base', 'Base (mainnet)'], ['zcash-mainnet', 'Zcash (mainnet)'],
+  // Testnets
   ['base-sepolia', 'Base Sepolia'], ['ethereum-sepolia', 'Ethereum Sepolia'],
   ['arbitrum-sepolia', 'Arbitrum Sepolia'], ['optimism-sepolia', 'Optimism Sepolia'],
   ['bitcoin-signet', 'Bitcoin Signet'], ['litecoin-testnet', 'Litecoin Testnet'],
@@ -21,9 +25,13 @@ const CHAINS = [
   ['solana-devnet', 'Solana Devnet'],
 ];
 const CHAIN_HEX = {
+  'base': '0x2105', // Base mainnet (8453)
   'base-sepolia': '0x14a34', 'ethereum-sepolia': '0xaa36a7',
   'arbitrum-sepolia': '0x66eee', 'optimism-sepolia': '0xaa37dc',
 };
+// The SwapContract lives on Base mainnet, so intent/swap txs go there regardless
+// of the swap's leg chains.
+const CONTRACT_CHAIN = 'base';
 
 let signer = null;
 let userAddress = null;
@@ -83,8 +91,8 @@ async function announceIntent() {
   try {
     const intentId = ethers.hexlify(ethers.randomBytes(32));
     const expiration = Math.floor(Date.now() / 1000 + hours * 3600);
-    log(out, 'Switch to Base Sepolia to announce…', 'dim');
-    await switchChain(CHAIN_HEX['base-sepolia']);
+    log(out, 'Switch to Base mainnet to announce…', 'dim');
+    await switchChain(CHAIN_HEX[CONTRACT_CHAIN]);
     const c = writeContract(signer);
     log(out, 'Announcing intent…', 'dim');
     const tx = await c.announceIntent(
