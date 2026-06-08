@@ -6,6 +6,28 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **24 EVM mainnet chains you can pick in the swap selector.** The From/To menus
+  now cover the major EVM networks (Ethereum, BNB Chain, Base, Polygon, OP,
+  Avalanche, Linea, Scroll, Mantle, Blast, Gnosis, Celo, Cronos, Sonic, Fantom,
+  Moonbeam, opBNB, Mode, Manta, Berachain, Unichain, World Chain, Taiko, Sei),
+  each with canonical chain ids and key-free public RPC defaults. Six more top
+  chains (zkSync Era, Arbitrum, Aurora, Kava, Metis, Polygon zkEVM) are held back
+  until a live funded settlement proves them, since their transaction shape
+  differs from the proven path (see TODOS).
+- **Chain logos in the selectors and explorer.** Each chain now shows its brand
+  mark, so you recognise the asset at a glance. The selector is a custom dropdown
+  (native menus can't show images) that still behaves like a normal field; a
+  logo that fails to load falls back to a small monogram, never a broken image.
+
+### Changed
+- **The settlement engine now picks the right transaction type per chain.** It
+  signs EIP-1559 (type-2) by default and a legacy (type-0) transaction for chains
+  that don't support 1559, plus a per-chain gas limit for chains that price L1
+  data into L2 gas. This is the groundwork that lets the six excluded chains be
+  switched on with a config line once each is live-verified. The proven
+  Base/Ethereum path is unchanged.
+
+### Added
 - **Market price quotes in the solver's Quote tab.** When a solver selects an
   intent, a live **Market price** panel now pulls each leg asset's USD spot from
   three independent, key-free sources (CoinGecko, Coinbase, CryptoCompare) and
