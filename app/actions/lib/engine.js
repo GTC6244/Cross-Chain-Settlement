@@ -114,7 +114,10 @@ async function getGasPriceCached(provider, chainId) {
 // ---- low-level EVM signer (micro-eth-signer) ------------------------------
 // Builds + signs with micro-eth-signer; uses the ethers provider for nonce,
 // gas, and broadcast only.
-async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
+// opts (optional): { legacy: bool, gasLimit: BigInt } -- per-chain tx shape,
+// supplied by makeEvmLeg from the CHAINS entry. Defaults: type-2 tx, 21000 gas.
+async function evmSignSend(ctx, rpcUrl, chainId, to, value, data, opts) {
+  opts = opts || {};
   // Pin a static network so the provider never does an eth_chainId auto-detect
   // round-trip per call (that detect intermittently failed with "could not
   // detect network" and added latency that pushed txs past the receipt budget).
@@ -122,25 +125,34 @@ async function evmSignSend(ctx, rpcUrl, chainId, to, value, data) {
   var from = ethAddr.fromPrivateKey(ctx.keyBytes);
   var nonce = await getNonce(provider, chainId, from);
   var gp = await getGasPriceCached(provider, chainId); // fetched once per chain/run
-  // EIP-1559 fields. Generous maxFee (3x) so txs mine within a couple blocks.
-  var maxPriorityFeePerGas = gp;
-  var maxFeePerGas = gp * 3n;
-  // Fixed gas limits -- no estimateGas call. estimateGas both costs an HTTP
-  // request (the sandbox caps outbound calls ~24/run) AND reverts on
-  // read-after-write lag for contract writes. Value transfers need 21000;
-  // contract writes get generous headroom.
-  var gasLimit = (data && data !== "0x") ? 200000n : 21000n;
-  // micro-eth-signer rejects an explicit undefined data field ("fields had
-  // validation errors"); the key must be ABSENT for plain value transfers.
+  // Gas limit -- no estimateGas call (it costs an HTTP request, and the sandbox
+  // caps outbound calls ~24/run, AND it reverts on read-after-write lag for
+  // contract writes). Contract writes get generous headroom; native transfers
+  // use the per-chain nativeGasLimit (default 21000). 21000 is the intrinsic gas
+  // for a transfer on STANDARD EVM (Ethereum, OP-stack chains bill the L1 fee
+  // separately), but NOT on Arbitrum-class chains, which fold the L1 calldata
+  // cost into L2 gas UNITS -- those pass a larger opts.gasLimit. (No shipped chain
+  // sets a non-default gasLimit today; the chains that need it are held back --
+  // see TODOS.md "EVM chains excluded pending live verification".)
+  var gasLimit = (data && data !== "0x") ? 200000n : (opts.gasLimit || 21000n);
+  // micro-eth-signer rejects an explicit undefined field, so build the tx with
+  // only the fields valid for its type. type-2 (EIP-1559) is prepare()'s default
+  // and the proven path; opts.legacy switches to a type-0 (legacy) tx for chains
+  // that expose no EIP-1559 baseFee and would reject a type-2 tx.
   var txFields = {
     to: to,
     value: value,
     nonce: BigInt(nonce),
-    maxFeePerGas: maxFeePerGas,
-    maxPriorityFeePerGas: maxPriorityFeePerGas,
     gasLimit: gasLimit,
     chainId: BigInt(chainId),
   };
+  if (opts.legacy) {
+    txFields.type = "legacy";
+    txFields.gasPrice = gp * 2n;         // single legacy price; 2x for inclusion
+  } else {
+    txFields.maxPriorityFeePerGas = gp;  // EIP-1559: generous 3x maxFee so txs
+    txFields.maxFeePerGas = gp * 3n;     // mine within a couple of blocks
+  }
   if (data && data !== "0x") txFields.data = data;
   var tx = EthTx.prepare(txFields);
   var signed = tx.signBy(ctx.keyBytes);
@@ -210,6 +222,16 @@ function makeEvmLeg(ctx, chainId_, role) {
   var legRpcUrls = ctx.params.legRpcUrls || {};
   var rpcUrl = legRpcUrls[chainId_] || cfg.rpc;
   var chainId = cfg.chainId;
+  // Per-chain tx shape: legacy (type-0) for chains that expose no EIP-1559
+  // baseFee (they reject type-2 txs), and a per-chain native-transfer gas limit
+  // (default 21000; larger for Arbitrum-class chains that meter L1 calldata as
+  // L2 gas). Both are read from the CHAINS entry. Latent today: no shipped chain
+  // sets either field -- the chains that need them are excluded pending live
+  // tests (see TODOS.md). Verified by test/evm-tx-type.test.js with mock CHAINS.
+  var txOpts = {
+    legacy: cfg.txType === "legacy",
+    gasLimit: cfg.nativeGasLimit ? BigInt(cfg.nativeGasLimit) : 21000n,
+  };
   // Pin a static network so the provider never does an eth_chainId auto-detect
   // round-trip per call (that detect intermittently failed with "could not
   // detect network" and added latency that pushed txs past the receipt budget).
@@ -224,21 +246,23 @@ function makeEvmLeg(ctx, chainId_, role) {
       return BigInt(b.toString());
     },
     settle: async function (o) {
-      return evmSignSend(ctx, rpcUrl, chainId, o.to, o.amount, null);
+      return evmSignSend(ctx, rpcUrl, chainId, o.to, o.amount, null, txOpts);
     },
-    // Drain entire balance minus a gas reserve to "to".
+    // Drain entire balance minus a gas reserve to "to". The reserve tracks the
+    // per-chain gas limit so Arbitrum-class chains hold back enough for the
+    // (much larger) native-transfer gas.
     drain: async function (o) {
       var bal = await this.getBalance(o.deposit);
       var gasPrice = await provider.getGasPrice();
-      var reserve = BigInt(gasPrice.toString()) * 2n * 21000n;
+      var reserve = BigInt(gasPrice.toString()) * 2n * txOpts.gasLimit;
       var send = bal - reserve;
       if (send <= 0n) return null;
-      return evmSignSend(ctx, rpcUrl, chainId, o.to, send, null);
+      return evmSignSend(ctx, rpcUrl, chainId, o.to, send, null, txOpts);
     },
     // EVM is the only family that can pay the fee to an on-chain owner address.
     sendFee: async function (o) {
       if (o.amount <= 0n) return null;
-      return evmSignSend(ctx, rpcUrl, chainId, o.to, o.amount, null);
+      return evmSignSend(ctx, rpcUrl, chainId, o.to, o.amount, null, txOpts);
     },
   };
 }
