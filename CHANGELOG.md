@@ -6,6 +6,17 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Market price quotes in the solver's Quote tab.** When a solver selects an
+  intent, a live **Market price** panel now pulls each leg asset's USD spot from
+  three independent, key-free sources (CoinGecko, Coinbase, CryptoCompare) and
+  shows each source's price, the **median** cross-rate, the fair dest amount for
+  the intent's source amount, and how the floor sits versus market. A live
+  margin readout under the dest-amount input shows the solver's spread (gross
+  margin when quoting below market value, a loss warning above it). Prices are
+  advisory display only — the on-chain floor and the solver's judgement still
+  govern, and no source is trusted alone. New `app/lib/prices.js` (asset/decimals
+  maps, the three sources, `fetchMarketRate`, median/unit helpers) with unit
+  coverage for the pure helpers in `test/lib.test.js`.
 - First live **EVM↔Zcash mainnet** settlement (swap #14): the transparent
   ZIP-243 signer is now proven on mainnet, not just regtest. The working provider
   is a hybrid — Tatum's RPC gateway live-fetches the consensus branch id
