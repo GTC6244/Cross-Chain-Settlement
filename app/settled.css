@@ -197,6 +197,21 @@ input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); ou
 .trust .t-title { font-weight: 600; font-size: 14px; }
 .trust .t-sub { font-size: 13px; color: var(--text-dim); }
 
+/* ===== Standing notice banner (unattended-system / no-liquidity warning) ===== */
+.notice-banner {
+  display: flex; gap: 12px; align-items: flex-start;
+  margin: 0 0 24px; padding: 14px 16px;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: var(--radius);
+  font-size: 14px; line-height: 1.55; color: var(--text);
+}
+.notice-banner .ico { color: var(--warning); flex-shrink: 0; margin-top: 1px; }
+.notice-banner .nb-title { font-weight: 600; margin-bottom: 2px; }
+.notice-banner .nb-body { color: var(--text-dim); }
+.notice-banner a { color: var(--accent-deep); font-weight: 600; text-decoration: none; }
+.notice-banner a:hover { text-decoration: underline; }
+
 /* ===== State banners (loading / empty / error / stale-truncated) ===== */
 .state-banner { display: flex; gap: 10px; align-items: center; padding: 12px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 16px; }
 .state-banner.loading { background: var(--surface-2); color: var(--text-dim); }
