@@ -43,6 +43,33 @@ pair runs only in the Lit runtime and is not covered by the Node tests.
   reuse the now-proven SOL leg, so they're lower-risk.) Each needs BOTH legs'
   providers wired — and any ZEC leg needs the hybrid (see the Zcash item).
 
+- **EVM chains excluded pending live verification (re-enable after a funded test)**
+  **Priority:** P2
+  When the top-30 EVM chains were added, 6 were held back from the selectable set
+  (`networks.js` CHAINS + the dropdown in `app/lib/chains.js`) because their
+  settlement path isn't proven on-chain. The 24 shipped chains all use the proven
+  standard path (EIP-1559 type-2 tx + 21000 native-transfer gas, same as the live
+  Base/Ethereum settlements). The excluded 6, and why:
+  - **zksync-era (324)** — native account-abstraction tx format; `micro-eth-signer`
+    can't produce a tx it accepts. Needs real engine work (a zkSync tx builder),
+    not just config. Keep out until then.
+  - **arbitrum (42161)** — Arbitrum meters the L1 calldata cost as L2 gas UNITS, so
+    a native transfer needs far more than 21000 gas. The engine supports a per-chain
+    `nativeGasLimit` (set 3_000_000 when re-adding); the exact need scales with the
+    live L1 base fee, so confirm a real transfer doesn't run out of gas.
+  - **aurora (1313161554), kava (2222), metis (1088), polygon-zkevm (1101)** —
+    no EIP-1559 `baseFeePerGas` (confirmed by `node test/rpc-smoke.mjs`), so a
+    type-2 tx is rejected. The engine supports `txType: 'legacy'` (type-0); set it
+    when re-adding. Aurora may ALSO need a `nativeGasLimit` (NEAR-backed gas).
+
+  Engine support for both fixes (`txType:'legacy'`, `nativeGasLimit`) is implemented
+  and unit-tested (`test/evm-tx-type.test.js`) but currently latent — no shipped
+  chain sets either field. **Re-enable steps per chain:** (1) add the entry back to
+  `networks.js` with the right `txType`/`nativeGasLimit`, (2) add it to the dropdown
+  group in `app/lib/chains.js`, (3) remove it from the `EXCLUDED` guard in
+  `test/chains-registry.test.js`, (4) run one live funded settlement and confirm
+  both legs land. `node test/rpc-smoke.mjs` re-checks RPC liveness + 1559 support.
+
 - **Wire a live Zcash provider for the ZEC pairs**
   **Priority:** P1
   ZIP-243 shim is verified on regtest only. `evm-zec`, `btc-zec`, `zec-sol`,

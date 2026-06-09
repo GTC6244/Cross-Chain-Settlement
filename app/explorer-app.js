@@ -9,22 +9,11 @@
 import {
   CONTRACT_ADDRESS, STATE_CLASSES, readContract, readSwap,
 } from './lib/contract.js';
+import { chainLabel, chainIconHtml, bindIconFallbacks } from './lib/chains.js';
 import { toggleTheme, initThemeLabel } from './lib/ui.js';
 
-// Human labels for the chain identifiers the contract stores as strings.
-const CHAIN_LABELS = {
-  // mainnet (live)
-  'base': 'Base', 'ethereum': 'Ethereum', 'bitcoin': 'Bitcoin',
-  'litecoin': 'Litecoin', 'dogecoin': 'Dogecoin', 'zcash': 'Zcash',
-  'zcash-mainnet': 'Zcash', 'solana': 'Solana',
-  // testnets
-  'base-sepolia': 'Base Sepolia', 'ethereum-sepolia': 'Ethereum Sepolia',
-  'arbitrum-sepolia': 'Arbitrum Sepolia', 'optimism-sepolia': 'Optimism Sepolia',
-  'bitcoin-signet': 'Bitcoin Signet', 'litecoin-testnet': 'Litecoin Testnet',
-  'dogecoin-testnet': 'Dogecoin Testnet', 'zcash-testnet': 'Zcash Testnet',
-  'solana-devnet': 'Solana Devnet',
-};
-const chainLabel = (id) => CHAIN_LABELS[id] || id || '—';
+// A chain id with its brand logo chip, for the ledger pair cell.
+const chainTag = (id) => `${chainIconHtml(id)}<span>${esc(chainLabel(id))}</span>`;
 
 // Cap how many swaps we hydrate in one pass so a busy contract never walks the
 // whole history; we always show the newest first and log what was withheld.
@@ -106,6 +95,7 @@ async function load() {
 // ---- render ---------------------------------------------------------------
 function renderRows(rowsEl) {
   rowsEl.innerHTML = swaps.map(rowHtml).join('');
+  bindIconFallbacks(rowsEl); // swap any failed brand logo for its monogram chip
   rowsEl.querySelectorAll('.ledger-row').forEach((row) => {
     row.addEventListener('click', () => toggle(row.dataset.id));
   });
@@ -122,7 +112,7 @@ function rowHtml(s) {
   const open = expanded.has(s.swapId);
   const row = `<div class="ledger-row${open ? ' selected' : ''}" data-id="${s.swapId}">
     <span class="id">#${s.swapId}</span>
-    <span class="pair">${esc(chainLabel(s.sourceChain))} → ${esc(chainLabel(s.destChain))}${pips}</span>
+    <span class="pair">${chainTag(s.sourceChain)} → ${chainTag(s.destChain)}${pips}</span>
     <span class="state-cell"><span class="badge ${stateCls}">${stateName}</span></span>
     <span class="num">${s.sourceAmount.toString()}</span>
     <span class="num">${s.destAmount.toString()}</span>

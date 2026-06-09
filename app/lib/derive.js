@@ -12,6 +12,7 @@
  */
 
 import { LIT_API_BASE } from './contract.js';
+import { CHAINS } from '../actions/lib/networks.js';
 
 /** F2: a fresh random salt, 32 bytes as lowercase hex. */
 export function randomSalt() {
@@ -20,9 +21,18 @@ export function randomSalt() {
   return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Every EVM chain (mainnet + testnet) is enumerated in networks.js, so pull the
+// 'evm' entries straight from there — adding a chain to the registry can never
+// desync this map. The non-EVM families stay explicit because networks.js groups
+// Bitcoin/Litecoin/Dogecoin under one 'utxo' family, while the template dispatch
+// needs them split into btc/ltc/doge.
+const EVM_FAMILY = Object.fromEntries(
+  Object.entries(CHAINS).filter(([, c]) => c.family === 'evm').map(([id]) => [id, 'evm']),
+);
+
 export const CHAIN_FAMILY = {
-  'base': 'evm', // Base mainnet (8453) — live EVM leg / contract host
-  'base-sepolia': 'evm', 'ethereum-sepolia': 'evm', 'arbitrum-sepolia': 'evm', 'optimism-sepolia': 'evm',
+  // EVM mainnet + testnet (incl. Base, the contract host) derive from networks.js.
+  ...EVM_FAMILY,
   'bitcoin-signet': 'btc', 'litecoin-testnet': 'ltc', 'dogecoin-testnet': 'doge',
   'zcash-testnet': 'zec', 'zcash-mainnet': 'zec', 'solana-devnet': 'sol',
 };

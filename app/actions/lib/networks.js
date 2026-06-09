@@ -24,11 +24,49 @@
  */
 
 export const CHAINS = {
-  // ---- EVM (secp256k1, signed with micro-eth-signer) --------------------
+  // ---- EVM mainnet — top chains by activity/volume ----------------------
+  // chainIds are canonical registry values. The `rpc` here is a KEY-FREE public
+  // default (see header) so it is safe to embed in the action/CID; point a leg
+  // at a private/keyed node at runtime via the legRpcUrls js_param instead of
+  // editing these. "By volume" is an approximate, time-varying ordering — treat
+  // this as a curated set of the major EVM chains, not a live leaderboard.
+  //
+  // Only chains whose settlement path is PROVEN (standard EIP-1559 type-2 + the
+  // 21000 native-transfer gas the engine assumes) are listed here. Six otherwise
+  // top chains are EXCLUDED pending a live funded settlement test — see TODOS.md
+  // ("EVM chains excluded pending live verification") for the list, the reason,
+  // and the re-enable steps. The engine already supports the two fixes those
+  // chains need (txType:'legacy' for no-EIP-1559 chains, nativeGasLimit for
+  // Arbitrum-class gas), so re-adding each is a config line + one live test.
+  'ethereum':      { family: 'evm', rpc: 'https://ethereum-rpc.publicnode.com',         chainId: 1 },
+  'bnb-chain':     { family: 'evm', rpc: 'https://bsc-rpc.publicnode.com',              chainId: 56 },
+  'base':          { family: 'evm', rpc: 'https://base-rpc.publicnode.com',             chainId: 8453 },
+  'polygon':       { family: 'evm', rpc: 'https://polygon-bor-rpc.publicnode.com',      chainId: 137 },
+  'optimism':      { family: 'evm', rpc: 'https://optimism-rpc.publicnode.com',         chainId: 10 },
+  'avalanche':     { family: 'evm', rpc: 'https://avalanche-c-chain-rpc.publicnode.com', chainId: 43114 },
+  'linea':         { family: 'evm', rpc: 'https://linea-rpc.publicnode.com',            chainId: 59144 },
+  'scroll':        { family: 'evm', rpc: 'https://scroll-rpc.publicnode.com',           chainId: 534352 },
+  'mantle':        { family: 'evm', rpc: 'https://mantle-rpc.publicnode.com',           chainId: 5000 },
+  'blast':         { family: 'evm', rpc: 'https://rpc.blast.io',                        chainId: 81457 },
+  'gnosis':        { family: 'evm', rpc: 'https://gnosis-rpc.publicnode.com',           chainId: 100 },
+  'celo':          { family: 'evm', rpc: 'https://forno.celo.org',                      chainId: 42220 },
+  'cronos':        { family: 'evm', rpc: 'https://evm.cronos.org',                      chainId: 25 },
+  'sonic':         { family: 'evm', rpc: 'https://rpc.soniclabs.com',                   chainId: 146 },
+  'fantom':        { family: 'evm', rpc: 'https://rpc.fantom.network',                  chainId: 250 },
+  'moonbeam':      { family: 'evm', rpc: 'https://moonbeam-rpc.publicnode.com',         chainId: 1284 },
+  'opbnb':         { family: 'evm', rpc: 'https://opbnb-rpc.publicnode.com',            chainId: 204 },
+  'mode':          { family: 'evm', rpc: 'https://mainnet.mode.network',                chainId: 34443 },
+  'manta-pacific': { family: 'evm', rpc: 'https://pacific-rpc.manta.network/http',      chainId: 169 },
+  'berachain':     { family: 'evm', rpc: 'https://rpc.berachain.com',                   chainId: 80094 },
+  'unichain':      { family: 'evm', rpc: 'https://mainnet.unichain.org',                chainId: 130 },
+  'world-chain':   { family: 'evm', rpc: 'https://worldchain-mainnet.g.alchemy.com/public', chainId: 480 },
+  'taiko':         { family: 'evm', rpc: 'https://rpc.mainnet.taiko.xyz',               chainId: 167000 },
+  'sei':           { family: 'evm', rpc: 'https://evm-rpc.sei-apis.com',                chainId: 1329 },
+
+  // ---- EVM testnet (secp256k1, signed with micro-eth-signer) ------------
   // Key-free public default (see header). Override at runtime via legRpcUrls.
-  'base':              { family: 'evm', rpc: 'https://base-rpc.publicnode.com',  chainId: 8453 },
   'base-sepolia':      { family: 'evm', rpc: 'https://sepolia.base.org',            chainId: 84532 },
-  'ethereum-sepolia':  { family: 'evm', rpc: 'https://rpc.sepolia.org',             chainId: 11155111 },
+  'ethereum-sepolia':  { family: 'evm', rpc: 'https://ethereum-sepolia-rpc.publicnode.com', chainId: 11155111 }, // was rpc.sepolia.org (404, rpc-smoke)
   'arbitrum-sepolia':  { family: 'evm', rpc: 'https://sepolia-rollup.arbitrum.io/rpc', chainId: 421614 },
   'optimism-sepolia':  { family: 'evm', rpc: 'https://sepolia.optimism.io',         chainId: 11155420 },
 

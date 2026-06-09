@@ -197,6 +197,21 @@ input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); ou
 .trust .t-title { font-weight: 600; font-size: 14px; }
 .trust .t-sub { font-size: 13px; color: var(--text-dim); }
 
+/* ===== Standing notice banner (unattended-system / no-liquidity warning) ===== */
+.notice-banner {
+  display: flex; gap: 12px; align-items: flex-start;
+  margin: 0 0 24px; padding: 14px 16px;
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--warning) 38%, var(--border));
+  border-radius: var(--radius);
+  font-size: 14px; line-height: 1.55; color: var(--text);
+}
+.notice-banner .ico { color: var(--warning); flex-shrink: 0; margin-top: 1px; }
+.notice-banner .nb-title { font-weight: 600; margin-bottom: 2px; }
+.notice-banner .nb-body { color: var(--text-dim); }
+.notice-banner a { color: var(--accent-deep); font-weight: 600; text-decoration: none; }
+.notice-banner a:hover { text-decoration: underline; }
+
 /* ===== State banners (loading / empty / error / stale-truncated) ===== */
 .state-banner { display: flex; gap: 10px; align-items: center; padding: 12px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 16px; }
 .state-banner.loading { background: var(--surface-2); color: var(--text-dim); }
@@ -216,7 +231,8 @@ input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); ou
 .ledger-row:last-child { border-bottom: none; }
 .ledger-row:hover { background: var(--surface-2); }
 .ledger-row.selected { background: var(--accent-soft); }
-.ledger-row .pair { font-weight: 600; }
+.ledger-row .pair { font-weight: 600; display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ledger-row .pair > span { display: inline-flex; align-items: center; gap: 6px; }
 .ledger-row .num { font-family: var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 .ledger-row .act { justify-self: end; }
 
@@ -296,3 +312,62 @@ input:focus-visible, select:focus-visible { outline: 2px solid var(--accent); ou
 }
 @media (max-width: 480px) { .row { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* ===== Chain logo chip ===== */
+/* A small circular token holding the brand logo. Contained on purpose so the
+   multicolor marks read as controlled tokens against the warm palette (DESIGN.md
+   reserves the pill/full radius for chain selectors). When the remote image
+   fails, .ic-failed reveals the on-brand monogram baked into data-mono. */
+.chain-ic {
+  position: relative; flex-shrink: 0;
+  width: 20px; height: 20px; border-radius: var(--radius-full);
+  background: var(--surface-2); border: 1px solid var(--border);
+  overflow: hidden; display: inline-flex; align-items: center; justify-content: center;
+}
+.chain-ic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.chain-ic.ic-failed img { display: none; }
+.chain-ic.ic-failed::after {
+  content: attr(data-mono);
+  font: 600 9px/1 var(--font); letter-spacing: .02em; color: var(--text-dim);
+}
+
+/* ===== Custom chain select (logo-bearing listbox over a hidden native select) ===== */
+.chain-select { position: relative; }
+/* Native <select> stays in the DOM as the value source of truth but is hidden
+   from sight; the styled facade below mirrors and drives it. */
+.cs-native {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+.cs-trigger {
+  width: 100%; min-height: 44px; padding: 9px 12px;
+  display: flex; align-items: center; gap: 9px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); font: 500 15px var(--font); cursor: pointer; text-align: left;
+  transition: border-color .15s, box-shadow .2s;
+}
+.cs-trigger:hover { border-color: var(--accent); }
+.chain-select.open .cs-trigger,
+.cs-trigger:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+.cs-trigger .cs-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-trigger .cs-caret { color: var(--text-dim); font-size: 11px; transition: transform .15s; }
+.chain-select.open .cs-trigger .cs-caret { transform: rotate(180deg); }
+
+.cs-panel {
+  position: absolute; z-index: 30; top: calc(100% + 6px); left: 0; right: 0;
+  max-height: 320px; overflow-y: auto; padding: 6px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg); outline: none;
+}
+.cs-group {
+  font: 600 10px var(--font); text-transform: uppercase; letter-spacing: .07em;
+  color: var(--text-dim); padding: 10px 8px 4px;
+}
+.cs-group:first-child { padding-top: 4px; }
+.cs-opt {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: 14px;
+}
+.cs-opt:hover, .cs-opt.active { background: var(--surface-2); }
+.cs-opt[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-deep); font-weight: 600; }
+.cs-opt .cs-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -9,30 +9,15 @@ import {
   CHAIN_RPC, BASE_RPC, STATE_NAMES, writeContract, readSwap,
 } from './lib/contract.js';
 import { CHAIN_FAMILY } from './lib/derive.js';
+import { chainOptionsHtml, enhanceChainSelect, evmChainHex } from './lib/chains.js';
 import { readQuotesForIntent, effectiveRate } from './lib/intents.js';
 import { verifySwapCid, fullVerifySwap, intentMatches } from './lib/verify.js';
 import { log, clearLog, showTab, toggleTheme, initThemeLabel } from './lib/ui.js';
 
-const CHAINS = [
-  // Mainnet (live) — the contract is deployed on Base mainnet; ZEC settles via
-  // the solver's NOWNodes/Tatum hybrid provider.
-  ['base', 'Base (mainnet)'], ['zcash-mainnet', 'Zcash (mainnet)'],
-  // Testnets
-  ['base-sepolia', 'Base Sepolia'], ['ethereum-sepolia', 'Ethereum Sepolia'],
-  ['arbitrum-sepolia', 'Arbitrum Sepolia'], ['optimism-sepolia', 'Optimism Sepolia'],
-  ['bitcoin-signet', 'Bitcoin Signet'], ['litecoin-testnet', 'Litecoin Testnet'],
-  ['dogecoin-testnet', 'Dogecoin Testnet'], ['zcash-testnet', 'Zcash Testnet'],
-  ['solana-devnet', 'Solana Devnet'],
-];
-const CHAIN_HEX = {
-  'base': '0x2105', // Base mainnet (8453)
-  'base-sepolia': '0x14a34', 'ethereum-sepolia': '0xaa36a7',
-  'arbitrum-sepolia': '0x66eee', 'optimism-sepolia': '0xaa37dc',
-};
 // The SwapContract lives on Base mainnet, so intent/swap txs go there regardless
-// of the swap's leg chains.
+// of the swap's leg chains. Chain ids/labels/logos + evmChainHex come from the
+// shared registry (app/lib/chains.js); no hardcoded chain or hex maps here.
 const CONTRACT_CHAIN = 'base';
-
 let signer = null;
 let userAddress = null;
 
@@ -40,9 +25,14 @@ let userAddress = null;
 function fillChains() {
   for (const id of ['source-chain', 'dest-chain']) {
     const sel = document.getElementById(id);
-    sel.innerHTML = CHAINS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+    sel.innerHTML = chainOptionsHtml();
   }
+  document.getElementById('source-chain').value = 'base-sepolia';
   document.getElementById('dest-chain').value = 'ethereum-sepolia';
+  // Replace each native <select> with a logo-bearing custom listbox (the select
+  // stays as the hidden value source of truth — every .value read still works).
+  enhanceChainSelect(document.getElementById('source-chain'));
+  enhanceChainSelect(document.getElementById('dest-chain'));
 }
 
 async function connectWallet() {
@@ -92,7 +82,7 @@ async function announceIntent() {
     const intentId = ethers.hexlify(ethers.randomBytes(32));
     const expiration = Math.floor(Date.now() / 1000 + hours * 3600);
     log(out, 'Switch to Base mainnet to announce…', 'dim');
-    await switchChain(CHAIN_HEX[CONTRACT_CHAIN]);
+    await switchChain(evmChainHex(CONTRACT_CHAIN));
     const c = writeContract(signer);
     log(out, 'Announcing intent…', 'dim');
     const tx = await c.announceIntent(
@@ -226,7 +216,7 @@ async function fundQuote(swapId) {
     log(out, 'Send ' + s.sourceAmount.toString() + ' on ' + s.sourceChain);
     log(out, 'Deposit address: ' + s.depositAddressSource);
     if (CHAIN_FAMILY[s.sourceChain] === 'evm' && s.tokenAddressSource === ethers.ZeroAddress) {
-      await switchChain(CHAIN_HEX[s.sourceChain]);
+      await switchChain(evmChainHex(s.sourceChain));
       const tx = await signer.sendTransaction({ to: s.depositAddressSource, value: s.sourceAmount });
       log(out, 'Tx submitted: ' + tx.hash, 'dim');
       await tx.wait();
