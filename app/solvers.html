@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settled — Solvers: Keep the speed, lose the unconstrained key</title>
+  <meta name="description" content="A position paper on cross-chain solvers: why hot inventory plus online keys is the real loss pattern, and how code-gated signing inside a TEE keeps strategy fast while constraining the key.">
+  <script>(function(){try{var t=localStorage.getItem('theme')||(window.matchMedia&&matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light');document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();</script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;1,9..144,500;1,9..144,600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="settled.css">
+  <style>
+    /* solvers.html — a long-form position paper. Editorial reading column on the
+       warm canvas; reuses the design tokens, adds prose rhythm not needed elsewhere. */
+    main.paper { max-width: 720px; margin: 40px auto 80px; padding: 0 24px; }
+
+    .paper .hero { text-align: left; margin-bottom: 40px; }
+    .paper .hero .eyebrow {
+      font: 600 11px var(--font); text-transform: uppercase; letter-spacing: .12em;
+      color: var(--accent-deep); margin-bottom: 14px;
+    }
+    .paper .hero h2 { font-size: clamp(30px, 5.5vw, 46px); max-width: 16ch; }
+    .paper .hero .lede { font-size: 17px; color: var(--text-dim); max-width: 60ch; margin-top: 16px; line-height: 1.6; }
+
+    .paper section { margin: 38px 0; }
+    .paper h3 {
+      font-family: var(--display); font-weight: 600; font-size: 24px;
+      letter-spacing: -0.02em; line-height: 1.15; margin-bottom: 14px;
+      display: flex; align-items: baseline; gap: 12px;
+    }
+    .paper h3 .n {
+      font: 600 12px var(--mono); color: var(--accent-deep);
+      background: var(--accent-soft); padding: 4px 9px; border-radius: var(--radius-full);
+      flex-shrink: 0; transform: translateY(-3px);
+    }
+    .paper h4 { font: 600 15px var(--font); margin: 20px 0 6px; }
+    .paper p { font-size: 16px; color: var(--text); line-height: 1.65; margin-bottom: 14px; }
+    .paper p.muted { color: var(--text-dim); font-size: 15px; }
+    .paper strong { font-weight: 600; }
+    .paper a { color: var(--accent-deep); text-decoration: none; border-bottom: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+    .paper a:hover { border-bottom-color: var(--accent); }
+    .paper code { font: 500 13px var(--mono); background: var(--surface-2); padding: 2px 6px; border-radius: 5px; word-break: break-word; }
+
+    .paper ul { margin: 0 0 16px 0; padding: 0; list-style: none; }
+    .paper ul li { position: relative; padding-left: 22px; margin-bottom: 9px; font-size: 16px; line-height: 1.6; }
+    .paper ul li::before { content: ""; position: absolute; left: 4px; top: 11px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+
+    .pull {
+      font-family: var(--display); font-size: 22px; line-height: 1.3; font-style: italic;
+      color: var(--text); border-left: 3px solid var(--accent); padding: 6px 0 6px 20px; margin: 28px 0;
+    }
+
+    .callout { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px 22px; box-shadow: var(--shadow); margin: 22px 0; }
+    .callout .k { font: 600 11px var(--font); text-transform: uppercase; letter-spacing: .08em; color: var(--accent-deep); display: block; margin-bottom: 8px; }
+
+    .stat { display: flex; gap: 20px; flex-wrap: wrap; margin: 22px 0; }
+    .stat .item { flex: 1; min-width: 160px; background: var(--accent-soft); border-radius: var(--radius); padding: 18px 20px; }
+    .stat .item .big { font-family: var(--display); font-size: 30px; font-weight: 600; color: var(--accent-deep); letter-spacing: -0.02em; }
+    .stat .item .cap { font-size: 13px; color: var(--text-dim); margin-top: 4px; }
+
+    .ptable { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 14px; }
+    .ptable th, .ptable td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    .ptable th { font: 600 11px var(--font); text-transform: uppercase; letter-spacing: .06em; color: var(--text-dim); }
+    .ptable td:first-child { font-weight: 600; white-space: nowrap; }
+    .ptable .role { font-size: 13px; color: var(--text-dim); }
+
+    .lifecycle { counter-reset: phase; margin: 18px 0; }
+    .lifecycle .phase { display: flex; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--border); }
+    .lifecycle .phase:last-child { border-bottom: none; }
+    .lifecycle .phase .idx { counter-increment: phase; flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%; background: var(--surface-2); color: var(--text-dim); font: 600 14px var(--mono); display: flex; align-items: center; justify-content: center; }
+    .lifecycle .phase.hot .idx { background: var(--accent); color: var(--on-accent); }
+    .lifecycle .phase .body .h { font-weight: 600; font-size: 15px; }
+    .lifecycle .phase .body .h .tag { font: 600 10px var(--font); text-transform: uppercase; letter-spacing: .06em; color: var(--error); margin-left: 8px; }
+    .lifecycle .phase .body p { font-size: 14px; color: var(--text-dim); margin: 3px 0 0; }
+
+    .dd { list-style: none; margin: 18px 0; padding: 0; counter-reset: q; }
+    .dd li { counter-increment: q; padding: 16px 0 16px 0; border-bottom: 1px solid var(--border); font-size: 16px; line-height: 1.55; }
+    .dd li:last-child { border-bottom: none; }
+    .dd li::before { content: "Q" counter(q); display: inline-block; font: 600 12px var(--mono); color: var(--accent-deep); background: var(--accent-soft); padding: 3px 8px; border-radius: var(--radius-full); margin-right: 12px; }
+
+    .cta-row { display: flex; gap: 12px; flex-wrap: wrap; margin: 26px 0; }
+    .cta-row .btn { width: auto; margin: 0; padding: 14px 22px; text-decoration: none; display: inline-flex; align-items: center; }
+    .cta-row .btn:hover { border-bottom: none; }
+
+    .endnote { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); font-size: 13px; color: var(--text-dim); line-height: 1.6; }
+    .endnote p { font-size: 13px; color: var(--text-dim); margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1><span class="dot" aria-hidden="true"></span> Settled <span class="role-tag">Solvers</span></h1>
+  <div class="bar-right">
+    <a class="theme-toggle" href="index.html" style="text-decoration:none">Send</a>
+    <a class="theme-toggle" href="solver.html" style="text-decoration:none">Solve</a>
+    <a class="theme-toggle" href="explorer.html" style="text-decoration:none">Explore</a>
+    <button class="theme-toggle" id="theme-btn" aria-label="Toggle color theme">◐ <span id="theme-label">Dark</span></button>
+  </div>
+</header>
+
+<main class="paper">
+
+  <!-- ABSTRACT / FORCING FUNCTION -->
+  <div class="hero">
+    <div class="eyebrow">Position paper · Cross-chain solvers</div>
+    <h2>Keep the speed. <em>Lose the unconstrained key.</em></h2>
+    <p class="lede">
+      Solvers accept an order on one chain and deliver the outcome on another. To win,
+      they need hot inventory and fast signatures. That same hot inventory, sitting behind
+      a key that must stay online, is the largest loss surface in cross-chain. This paper
+      argues the fix isn't slower solvers — it's <strong>signing that's gated by code, not by an
+      operator</strong>. Settled is a working example.
+    </p>
+  </div>
+
+  <div class="cta-row">
+    <a class="btn btn-primary" href="solver.html">Open the solver app →</a>
+    <a class="btn btn-ghost" href="explorer.html">See every swap on-chain</a>
+  </div>
+
+  <!-- 1. THE FORCING FUNCTION -->
+  <section>
+    <h3><span class="n">01</span> The forcing function</h3>
+    <p>
+      The old cross-chain flow asked the user to do the routing: choose a bridge, choose a
+      DEX, approve, wait, hope. Intent-based systems flipped it. The user states the
+      <em>outcome</em> — "I have this on chain A, I want at least that on chain B" — and a
+      market of solvers competes to deliver it. Better UX, better pricing, less for the
+      user to get wrong.
+    </p>
+    <p>
+      But convenience moves the risk, it doesn't remove it. Someone now has to hold
+      inventory on both sides and sign the transfers that fill the order. The faster that
+      someone fills, the more inventory they keep hot and the more readily their keys must
+      sign. The competitive pressure that makes solvers good is the same pressure that
+      makes them dangerous to run.
+    </p>
+  </section>
+
+  <!-- 2. THE LOSS PATTERN -->
+  <section>
+    <h3><span class="n">02</span> The loss pattern</h3>
+    <p>
+      The headline risk in cross-chain isn't abstract "bridge risk." It's far more boring:
+      <strong>inventory controlled by a key that has to be online to be useful.</strong> A leaked
+      hot wallet, a compromised API key that can trigger a signer, an operator-side bug that
+      releases a transfer it shouldn't — the asset is gone the moment the signature goes out.
+    </p>
+    <div class="stat">
+      <div class="item">
+        <div class="big">~$1.0–1.5B</div>
+        <div class="cap">Estimated 2024 losses attributed to private-key &amp; access compromise</div>
+      </div>
+      <div class="item">
+        <div class="big">~$2.2B</div>
+        <div class="cap">Directional total crypto theft figure for the same window</div>
+      </div>
+    </div>
+    <p class="muted">
+      Figures are directional, drawn from public post-mortems and industry tallies. The
+      point isn't the exact number — it's the <em>shape</em>: the dominant failure is not
+      cryptography breaking, it's a key that could sign something it never should have.
+    </p>
+    <p class="pull">
+      If a compromised key can move your inventory, you don't have a custody model — you
+      have a race between you and whoever gets the key first.
+    </p>
+  </section>
+
+  <!-- 3. SOLVER TAXONOMY -->
+  <section>
+    <h3><span class="n">03</span> A taxonomy of solvers</h3>
+    <p>
+      "Solver" covers a wide range of designs. They differ in how orders arrive and how
+      winners are chosen, but every one of them eventually answers the same question:
+      <strong>who can move solver inventory, and under what conditions?</strong>
+    </p>
+    <table class="ptable">
+      <thead><tr><th>Category</th><th>How it fills</th><th>Inventory control question</th></tr></thead>
+      <tbody>
+        <tr><td>Fast-fill networks</td><td class="role">Relayer fronts the destination asset, settles later from a pool</td><td class="role">What stops the relayer key from fronting a fill that won't settle?</td></tr>
+        <tr><td>Dutch-auction resolvers</td><td class="role">Price decays until a solver takes the order</td><td class="role">Is the winning signature checked against the order it claims to fill?</td></tr>
+        <tr><td>Batch-auction solvers</td><td class="role">Orders cleared together at a uniform price</td><td class="role">Who authorizes the batch settlement transfer?</td></tr>
+        <tr><td>RFQ makers</td><td class="role">Maker streams a firm quote, fills on acceptance</td><td class="role">Can a stolen quoting credential also release funds?</td></tr>
+        <tr><td>Aggregators / routers</td><td class="role">Split an order across venues and chains</td><td class="role">How many keys touch the path, and which can move value?</td></tr>
+        <tr><td>Settlement rails</td><td class="role">Carry the cross-chain message the fill depends on</td><td class="role">Is the source-chain fact verified before the destination pays?</td></tr>
+      </tbody>
+    </table>
+    <p class="muted">
+      The categories compete on latency and price. They converge on one operational truth:
+      the value lives behind a signature, and the safety of the whole thing is the safety of
+      whatever decides to release it.
+    </p>
+  </section>
+
+  <!-- 4. EXECUTION LIFECYCLE -->
+  <section>
+    <h3><span class="n">04</span> Where the signatures live</h3>
+    <p>
+      Walk any solver's lifecycle and the risk localizes fast. Intake and selection move
+      data. The later phases move money — and those are the signatures where a compromise
+      becomes a loss.
+    </p>
+    <div class="lifecycle">
+      <div class="phase"><div class="idx"></div><div class="body"><div class="h">Order intake</div><p>An intent arrives. No inventory moves. A leaked credential here leaks information, not funds.</p></div></div>
+      <div class="phase"><div class="idx"></div><div class="body"><div class="h">Solver selection</div><p>The market decides who fills. Still no transfer — the danger is downstream of the winner.</p></div></div>
+      <div class="phase hot"><div class="idx"></div><div class="body"><div class="h">Destination execution <span class="tag">signs value</span></div><p>The solver pays the user on the destination chain. First place a key moves real inventory.</p></div></div>
+      <div class="phase hot"><div class="idx"></div><div class="body"><div class="h">Claim / settlement <span class="tag">signs value</span></div><p>The solver reclaims the source asset. Must be gated on the source-chain fact actually being true.</p></div></div>
+      <div class="phase hot"><div class="idx"></div><div class="body"><div class="h">Rebalancing <span class="tag">signs value</span></div><p>Inventory is moved back into position. Routine, frequent, and a favorite target.</p></div></div>
+    </div>
+    <p>
+      Three of five phases are inventory-moving signatures. Securing a solver is, in
+      practice, securing <em>those three moments</em> — making each one provably conditional
+      on the order, the route, the amount, the deadline, and the source-chain truth.
+    </p>
+  </section>
+
+  <!-- 5. THE PROPOSITION -->
+  <section>
+    <h3><span class="n">05</span> The proposition: verifiable control</h3>
+    <p>
+      The reflex fix — multisig everything, add a human approval — trades away the latency
+      that makes a solver competitive. The better fix keeps strategy fast and constrains
+      only the one thing that matters: <strong>release of the signature.</strong>
+    </p>
+    <p>
+      Make signing <strong>programmable and attestable</strong>. The inventory sits behind code, not
+      behind an operator. Before any transfer, that code checks the order, the route, the
+      amount, the deadline, and profitability against the on-chain facts — and only then
+      releases a signature. The code runs in a Trusted Execution Environment that produces
+      evidence of what it approved or denied. The strategy can stay as fast as it likes; the
+      key simply can't be talked into signing something the policy forbids.
+    </p>
+    <ul>
+      <li><strong>Policy-gated inventory</strong> — funds release only when the order, amount, and deadline check out, evaluated by code rather than discretion.</li>
+      <li><strong>Attested execution</strong> — authorization happens inside a TEE that yields an auditable record of each approval and denial.</li>
+      <li><strong>Source-chain verification</strong> — destination payments and claims are conditioned on the source-chain state actually being what was claimed.</li>
+      <li><strong>Role separation</strong> — quoting, strategy, execution, and emergency authority are split so a single leaked credential can't move funds.</li>
+      <li><strong>Phase-aware strictness</strong> — the latency-sensitive fill and the slower claim can carry different gates without one weakening the other.</li>
+    </ul>
+    <p class="pull">
+      Keep the strategy fast. Gate the signature with code. Prove what the code decided.
+    </p>
+  </section>
+
+  <!-- 6. SETTLED AS A WORKING EXAMPLE -->
+  <section>
+    <h3><span class="n">06</span> Settled: one concrete implementation</h3>
+    <p>
+      <a href="https://developer.litprotocol.com/">Settled</a> is a trustless cross-chain
+      settlement protocol built exactly on this idea. It runs a two-sided market — users
+      announce intents, solvers compete to fill them — and the inventory for each fill never
+      sits behind an operator's hot wallet. It sits behind a <strong>Lit Action</strong>: code whose
+      signing key is generated and used only inside a TEE, attested by a complete
+      root-of-trust system. No one — not even Lit — can extract it.
+    </p>
+    <div class="callout">
+      <span class="k">How a fill is constrained</span>
+      <p style="margin-bottom:0">
+        Each swap gets its own salt, which produces a unique IPFS CID, which derives a
+        <em>unique signing key and unique deposit addresses</em>. The key is bound to the exact
+        audited code at that CID. Before the user funds, the app recomputes the CID from the
+        published template and compares — so a quote can only ever run the code it claims to.
+        Funding one quote can never release another's key.
+      </p>
+    </div>
+    <h4>The same five gates, made concrete</h4>
+    <ul>
+      <li><strong>Policy-gated inventory.</strong> The action reads <em>all</em> settlement parameters from the on-chain contract and asserts the delivered amount clears the user's floor (<code>destAmount &gt;= minDestAmount</code>) before signing. A leaked API key can't widen those terms — the code, not the caller, decides.</li>
+      <li><strong>Attested execution.</strong> Signing happens inside the TEE; the swap ends with a signed receipt carrying both tx hashes, amounts, and timestamps — evidence of what was settled.</li>
+      <li><strong>Source-chain verification.</strong> Before settling either leg the action confirms <em>both</em> deposits are funded, so it never pays one side when the other can't be. UTXO and Zcash legs are held back from finalize until their settlement tx reaches the swap's confirmation depth — fail-closed: an unreachable explorer defers rather than assumes success.</li>
+      <li><strong>Role separation.</strong> A four-address model gives every party its own address per chain: on success the source asset pays the solver and the dest asset pays the user; on expiry each side is refunded on its own chain. Settlement functions can only be called by the Lit Action's own address.</li>
+      <li><strong>Phase-aware, idempotent steps.</strong> The action does one settlement step per invocation and logs each leg on-chain before the next. A crash, timeout, or sandbox kill mid-swap is recovered by re-invoking — the contract refuses to settle a leg twice, pay the fee twice, or finalize without both legs.</li>
+    </ul>
+    <p class="muted">
+      No bridges, no wrapped tokens, no HTLC complexity. Eleven chain pairs across EVM,
+      Bitcoin, Litecoin, Dogecoin, Zcash, and Solana share one chain-agnostic settlement
+      engine. EVM↔EVM (Base mainnet), EVM↔Bitcoin (signet), EVM↔Solana, and EVM↔Zcash
+      (mainnet) have settled live end to end.
+    </p>
+  </section>
+
+  <!-- 7. PROOF & AUDITABILITY -->
+  <section>
+    <h3><span class="n">07</span> Proof, not promises</h3>
+    <p>
+      A mature solver shouldn't ask to be trusted — it should be able to show its work. The
+      bar:
+    </p>
+    <ul>
+      <li>Inventory moved under <strong>verified policy</strong>, not operator discretion — and you can point to the code that enforced it.</li>
+      <li>Evidence that a risky request was genuinely <strong>denied</strong>, not merely never attempted.</li>
+      <li>Key material that <strong>cannot be exported</strong> or used outside the attested code path.</li>
+      <li>Execution tied to a <strong>code identity</strong> (here, an IPFS CID) and to on-chain facts, so any settlement step can be reconstructed after the fact.</li>
+    </ul>
+    <p>
+      Settled meets this by construction: every leg's tx hash is stored on the contract, the
+      fee is logged independently of the legs, the final receipt is signed by the action's
+      key, and the read-only <a href="explorer.html">Explorer</a> renders each swap's full
+      on-chain record — state, the four role addresses, deposit addresses, both legs, fee,
+      and the action that custodied it.
+    </p>
+  </section>
+
+  <!-- 8. DUE DILIGENCE -->
+  <section>
+    <h3><span class="n">08</span> Questions to ask any solver</h3>
+    <p class="muted">
+      The gap between "we're careful" and "the funds can't move unless code allows it" is the
+      whole game. Six questions that expose it:
+    </p>
+    <ol class="dd">
+      <li>If an attacker has your API keys, can they still move funds — or does code gate every transfer?</li>
+      <li>Can you <em>prove</em> a risky or out-of-policy fill was denied, not just that it didn't happen?</li>
+      <li>Is signing authority separated from strategy, so one leaked credential isn't game over?</li>
+      <li>What reconstructs source-chain truth before a claim or withdrawal is signed?</li>
+      <li>Can you show an auditor exactly which code authorized a given movement?</li>
+      <li>Can the signing key be exported, or does it exist only inside attested execution?</li>
+    </ol>
+  </section>
+
+  <!-- CLOSING -->
+  <section>
+    <h3><span class="n">09</span> Where to go next</h3>
+    <p>
+      Settled is open source and live. Fork the working example, read the engine, or watch a
+      real settlement complete in the open.
+    </p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="solver.html">Open the solver app →</a>
+      <a class="btn btn-ghost" href="index.html">Announce an intent</a>
+      <a class="btn btn-ghost" href="explorer.html">Browse settled swaps</a>
+    </div>
+    <p class="pull">Keep the speed. Lose the unconstrained key.</p>
+  </section>
+
+  <div class="endnote">
+    <p>
+      <strong>Disclosures.</strong> This page summarizes public materials and the Settled
+      codebase as of June 2026. Loss figures are directional and drawn from public
+      post-mortems; exact attribution varies by source. Production details — confirmation
+      depths, supported pairs, and provider configuration — vary by deployment; see the
+      project README and <code>DESIGN.md</code> for the current state. Settled keeps signing
+      keys inside a Trusted Execution Environment; it is not a threshold or atomic-swap
+      protocol. Nothing here is investment, legal, or security advice.
+    </p>
+  </div>
+
+</main>
+
+<script>
+  // Minimal theme toggle (this page has no app controller of its own).
+  (function () {
+    var btn = document.getElementById('theme-btn');
+    var label = document.getElementById('theme-label');
+    function sync() {
+      var dark = document.documentElement.getAttribute('data-theme') === 'dark';
+      if (label) label.textContent = dark ? 'Light' : 'Dark';
+    }
+    sync();
+    if (btn) btn.addEventListener('click', function () {
+      var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', next);
+      try { localStorage.setItem('theme', next); } catch (e) {}
+      sync();
+    });
+  })();
+</script>
+</body>
+</html>
